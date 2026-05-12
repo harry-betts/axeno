@@ -1,9 +1,11 @@
-import { Contact } from "../../types";
+import { Contact, Message } from "../../types";
+import { contactInitials, formatMessageTime, lastMessage, unreadCount } from "../../utils";
 import { IconSearch, IconPlus, IconSettings } from "../icons";
 import "./Sidebar.css";
 
 interface Props {
   contacts: Contact[];
+  allMessages: Record<string, Message[]>;
   activeContactId: string;
   onSelectContact: (id: string) => void;
   onOpenAddContact: () => void;
@@ -13,7 +15,7 @@ interface Props {
 }
 
 export default function Sidebar({
-  contacts, activeContactId, onSelectContact,
+  contacts, allMessages, activeContactId, onSelectContact,
   onOpenAddContact, onOpenSettings,
   myInitials, myDisplayName,
 }: Props) {
@@ -31,20 +33,25 @@ export default function Sidebar({
       <div className="sidebar-list">
         {contacts.map((c) => {
           const isActive = c.id === activeContactId;
+          const msgs = allMessages[c.id] ?? [];
+          const last = lastMessage(msgs);
+          const preview = last?.text ?? "";
+          const time = last ? formatMessageTime(last.timestamp) : "";
+          const unread = unreadCount(msgs, c.lastReadAt);
           return (
             <div
               key={c.id}
               onClick={() => onSelectContact(c.id)}
               className={`contact-row ${isActive ? "active" : ""}`}
             >
-              <div className="avatar">{c.initials}</div>
+              <div className="avatar">{contactInitials(c)}</div>
               <div className="contact-info">
-                <div className="contact-id">{c.id}</div>
-                <div className="contact-preview">{c.preview}</div>
+                <div className="contact-id">{c.alias ?? c.id}</div>
+                <div className="contact-preview">{preview}</div>
               </div>
               <div className="contact-meta">
-                <span className="contact-time">{c.time}</span>
-                {c.unread > 0 && <div className="unread-badge">{c.unread}</div>}
+                <span className="contact-time">{time}</span>
+                {unread > 0 && <div className="unread-badge">{unread}</div>}
               </div>
             </div>
           );

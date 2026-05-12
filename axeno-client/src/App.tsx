@@ -42,6 +42,7 @@ export default function App() {
     <div className="app-root">
       <Sidebar
         contacts={contacts}
+        allMessages={mockMessages}
         activeContactId={activeContactId}
         onSelectContact={setActiveContactId}
         onOpenAddContact={() => setShowAddContact(true)}

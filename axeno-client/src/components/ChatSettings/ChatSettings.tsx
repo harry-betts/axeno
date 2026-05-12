@@ -1,4 +1,5 @@
 import { Contact, AppSettings, ServerChoice } from "../../types";
+import { contactInitials } from "../../utils";
 import {
   IconX, IconShield, IconTrash, IconUserX, IconChevronRight, IconChevronDown,
 } from "../icons";
@@ -42,7 +43,7 @@ export default function ChatSettings({ contact, settings, onClose, onOpenVerify,
 
         <div className="chat-settings-body">
           <div className="chat-settings-identity">
-            <div className="chat-settings-avatar">{contact.initials}</div>
+            <div className="chat-settings-avatar">{contactInitials(contact)}</div>
             <div className="chat-settings-contact-id">{contact.id}4e9b...c2a1</div>
           </div>
 

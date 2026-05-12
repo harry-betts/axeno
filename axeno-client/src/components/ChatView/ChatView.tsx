@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Contact, Message } from "../../types";
+import { contactInitials, formatMessageTime } from "../../utils";
 import { IconDots, IconPaperclip, IconArrowUp } from "../icons";
 import "./ChatView.css";
 
@@ -15,7 +16,7 @@ export default function ChatView({ contact, messages, onOpenChatSettings }: Prop
   return (
     <main className="chat-view">
       <header className="chat-header">
-        <div className="chat-avatar">{contact.initials}</div>
+        <div className="chat-avatar">{contactInitials(contact)}</div>
         <div className="chat-header-info">
           <div className="chat-contact-id">{contact.id}4e9b</div>
         </div>
@@ -43,7 +44,7 @@ export default function ChatView({ contact, messages, onOpenChatSettings }: Prop
               <div className={`bubble ${msg.mine ? "bubble-mine" : "bubble-theirs"}`}>
                 {msg.text}
               </div>
-              <div className="message-time">{msg.time}</div>
+              <div className="message-time">{formatMessageTime(msg.timestamp)}</div>
             </div>
           );
         })}

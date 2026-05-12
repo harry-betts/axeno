@@ -1,17 +1,21 @@
+export interface InviteCode {
+  id: string;
+  code: string;
+  createdAt: number; // Unix ms
+}
+
 export interface Contact {
   id: string;
-  initials: string;
-  preview: string;
-  time: string;
-  unread: number;
+  alias?: string;            // user-settable local label; initials fall back to first 2 chars of id
+  lastReadAt: number | null; // Unix ms of last read received message; null = never
   serverChoice?: ServerChoice;
 }
 
 export interface Message {
-  id: number;
+  id: string;        // UUID — globally unique, safe for retry / out-of-order delivery
   mine: boolean;
   text: string;
-  time: string;
+  timestamp: number; // Unix ms
 }
 
 export interface PrivateServer {
@@ -27,6 +31,7 @@ export type ServerChoice =
 export interface AppSettings {
   defaultServer: ServerChoice;
   privateServers: PrivateServer[];
+  inviteCodes: InviteCode[];
   readReceipts: boolean;
   defaultDisappearingMessages: number;
   notificationsEnabled: boolean;
@@ -34,12 +39,13 @@ export interface AppSettings {
   notificationShowSender: boolean;
   sendOnEnter: boolean;
   messageTextSize: "small" | "medium" | "large";
-  messageRetentionDays: number;
+  // messageRetentionDays removed: retention is a per-server config, not a client setting
 }
 
 export const defaultSettings: AppSettings = {
   defaultServer: { kind: "official" },
   privateServers: [],
+  inviteCodes: [],
   readReceipts: true,
   defaultDisappearingMessages: 0,
   notificationsEnabled: true,
@@ -47,5 +53,4 @@ export const defaultSettings: AppSettings = {
   notificationShowSender: false,
   sendOnEnter: true,
   messageTextSize: "medium",
-  messageRetentionDays: 30,
 };

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AppSettings, PrivateServer, ServerChoice } from "../../types";
+import { AppSettings, InviteCode, PrivateServer, ServerChoice } from "../../types";
 import {
   IconArrowLeft, IconKey, IconServer, IconShield, IconBell, IconEye,
   IconInfo, IconCopy, IconPlus, IconTrash, IconCheck, IconChevronDown, IconEdit,
@@ -40,7 +40,7 @@ export default function Settings({ settings, onChange, onClose, displayName, onC
         </nav>
 
         <main className="settings-content">
-          {section === "identity"      && <IdentitySection displayName={displayName} onChangeName={onChangeName} />}
+          {section === "identity"      && <IdentitySection displayName={displayName} onChangeName={onChangeName} inviteCodes={settings.inviteCodes} onChangeInviteCodes={(inviteCodes) => onChange({ ...settings, inviteCodes: inviteCodes })} />}
           {section === "servers"       && <ServersSection settings={settings} onChange={onChange} />}
           {section === "privacy"       && <PrivacySection settings={settings} onChange={onChange} />}
           {section === "notifications" && <NotificationsSection settings={settings} onChange={onChange} />}
@@ -112,11 +112,6 @@ function Select<T extends string>({ value, options, onChange }: { value: T; opti
 
 // ---------- Sections ----------
 
-interface ConnectionCode {
-  id: string;
-  code: string;
-}
-
 function generateCode(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   const rand = (n: number) =>
@@ -128,13 +123,14 @@ function computeInitials(name: string): string {
   return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
 }
 
-function IdentitySection({ displayName, onChangeName }: { displayName: string; onChangeName: (name: string) => void }) {
+function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInviteCodes }: {
+  displayName: string;
+  onChangeName: (name: string) => void;
+  inviteCodes: InviteCode[];
+  onChangeInviteCodes: (inviteCodes: InviteCode[]) => void;
+}) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(displayName);
-
-  const [codes, setCodes] = useState<ConnectionCode[]>(() => [
-    { id: "initial", code: generateCode() },
-  ]);
   const [copied, setCopied] = useState<string | null>(null);
 
   const saveName = () => {
@@ -149,11 +145,12 @@ function IdentitySection({ displayName, onChangeName }: { displayName: string; o
   };
 
   const addCode = () => {
-    setCodes(prev => [...prev, { id: `${Date.now()}`, code: generateCode() }]);
+    const next: InviteCode = { id: `${Date.now()}`, code: generateCode(), createdAt: Date.now() };
+    onChangeInviteCodes([...inviteCodes, next]);
   };
 
   const removeCode = (id: string) => {
-    setCodes(prev => prev.filter(c => c.id !== id));
+    onChangeInviteCodes(inviteCodes.filter(c => c.id !== id));
   };
 
   const copyCode = (id: string, code: string) => {
@@ -196,20 +193,20 @@ function IdentitySection({ displayName, onChangeName }: { displayName: string; o
         </div>
       </div>
 
-      <div className="codes-block">
-        <div className="codes-block-header">
-          <div className="codes-block-title">Connection codes</div>
-          <div className="codes-block-desc">
+      <div className="inviteCodes-block">
+        <div className="inviteCodes-block-header">
+          <div className="inviteCodes-block-title">Connection inviteCodes</div>
+          <div className="inviteCodes-block-desc">
             Share a code with someone so they can start a conversation with you.
             Generate as many as you need and delete them whenever you like.
           </div>
         </div>
 
         <div className="code-list">
-          {codes.length === 0 && (
-            <div className="code-empty">No connection codes. Generate one below.</div>
+          {inviteCodes.length === 0 && (
+            <div className="code-empty">No connection inviteCodes. Generate one below.</div>
           )}
-          {codes.map(c => (
+          {inviteCodes.map(c => (
             <div className="code-item" key={c.id}>
               <span className="code-string">{c.code}</span>
               <div className="code-actions">
@@ -232,7 +229,7 @@ function IdentitySection({ displayName, onChangeName }: { displayName: string; o
           ))}
         </div>
 
-        <button className="btn btn-secondary codes-generate-btn" onClick={addCode}>
+        <button className="btn btn-secondary inviteCodes-generate-btn" onClick={addCode}>
           <IconPlus /> Generate new code
         </button>
       </div>
@@ -381,23 +378,6 @@ function PrivacySection({ settings, onChange }: { settings: AppSettings; onChang
           />
         }
       />
-            <Row
-        label="Local message retention"
-        description="How long undelivered messages are kept on the relay before being dropped."
-        control={
-          <Select
-            value={String(settings.messageRetentionDays) as any}
-            options={[
-              { value: "7",  label: "7 days" },
-              { value: "14", label: "14 days" },
-              { value: "30", label: "30 days" },
-              { value: "60", label: "60 days" },
-            ]}
-            onChange={(v) => onChange({ ...settings, messageRetentionDays: parseInt(v) })}
-          />
-        }
-      />
-
     </Section>
   );
 }
