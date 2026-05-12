@@ -4,6 +4,7 @@ import {
   IconLock, IconEye, IconEyeOff, IconSmartphone, IconUser,
 } from "../icons";
 import "./Onboarding.css";
+import { invoke } from "@tauri-apps/api/core";
 
 interface Props {
   onComplete: (displayName: string) => void;
@@ -21,7 +22,7 @@ type Step =
 
 type GeneratingFor = "new" | "transfer";
 
-// Plausible QR Version 1 (21×21) with correct finder patterns
+// Static QR Pattern for the "Transfer" placeholder
 const QR_PATTERN = [
   [1,1,1,1,1,1,1,0,1,0,1,0,1,0,1,1,1,1,1,1,1],
   [1,0,0,0,0,0,1,0,1,1,0,1,0,0,1,0,0,0,0,0,1],
@@ -83,14 +84,7 @@ export default function Onboarding({ onComplete }: Props) {
 
   const startNewIdentity = () => {
     setGeneratingFor("new");
-    setStep("generating");
-    setTimeout(() => setStep("set-password"), 1800);
-  };
-
-  const completeTransfer = () => {
-    setGeneratingFor("transfer");
-    setStep("generating");
-    setTimeout(() => setStep("set-password"), 1400);
+    setStep("set-password"); // Move to password first; keys need password to be encrypted
   };
 
   const submitTransferKey = () => {
@@ -99,10 +93,12 @@ export default function Onboarding({ onComplete }: Props) {
       return;
     }
     setTransferKeyError("");
-    completeTransfer();
+    setGeneratingFor("transfer");
+    setStep("set-password");
   };
 
-  const submitPassword = () => {
+  const submitPassword = async () => {
+    // 1. Client-side validation
     if (password.length < 8) {
       setPasswordError("Password must be at least 8 characters.");
       return;
@@ -111,8 +107,27 @@ export default function Onboarding({ onComplete }: Props) {
       setPasswordError("Passwords do not match.");
       return;
     }
+
     setPasswordError("");
-    setStep(generatingFor === "new" ? "set-profile" : "done");
+    setStep("generating"); // Trigger the loading state
+
+    try {
+      // 2. Call the Rust Backend
+      // This will take ~1-2 seconds because of Argon2id cost.
+      // The CSS spinner will continue to animate because this is an async call.
+      const fingerprint = await invoke<string>("create_identity", { 
+        passphrase: password 
+      });
+      
+      console.log("Successfully generated identity:", fingerprint);
+
+      // 3. Proceed to final steps
+      setStep(generatingFor === "new" ? "set-profile" : "done");
+    } catch (err) {
+      console.error("Failed to generate identity:", err);
+      setPasswordError("Encryption failed. Please try a different password.");
+      setStep("set-password");
+    }
   };
 
   const loadingText =
@@ -127,7 +142,6 @@ export default function Onboarding({ onComplete }: Props) {
         {/* ── Welcome ── */}
         {step === "welcome" && (
           <>
-            {/* <div className="onboarding-brand">Axeno</div> */}
             <h1 className="onboarding-title">Private by design</h1>
             <p className="onboarding-text">
               Your identity lives only on your device. No accounts, no servers,
@@ -186,15 +200,11 @@ export default function Onboarding({ onComplete }: Props) {
                 <span className="onboarding-choice-icon"><IconSmartphone /></span>
                 <div className="onboarding-choice-body">
                   <div className="onboarding-choice-title">Transfer from device</div>
-                  <div className="onboarding-choice-desc">Bring your identity over from your phone or another device.</div>
+                  <div className="onboarding-choice-desc">Bring your identity over from another device.</div>
                 </div>
                 <span className="onboarding-choice-arrow">›</span>
               </button>
             </div>
-{/* 
-            <p className="onboarding-fineprint">
-              There is no server-side recovery. Your identity exists only where you put it.
-            </p> */}
           </>
         )}
 
@@ -206,20 +216,14 @@ export default function Onboarding({ onComplete }: Props) {
             </button>
             <h1 className="onboarding-title">Scan this code</h1>
             <p className="onboarding-text">
-              On your other device, open Axeno and go to{" "}
-              <strong>Settings → Identity → Transfer to device</strong>, then scan
-              the QR code below.
+              On your other device, scan the code to transfer your identity.
             </p>
-
             <div className="qr-code-container">
               <FakeQRCode />
             </div>
-
-
             <button className="btn btn-primary onboarding-btn" onClick={() => setStep("transfer-code")}>
               Enter a code instead
             </button>
-
           </>
         )}
 
@@ -230,36 +234,21 @@ export default function Onboarding({ onComplete }: Props) {
               ← Back
             </button>
             <h1 className="onboarding-title">Enter transfer code</h1>
-            <p className="onboarding-text">
-              On your other device, go to{" "}
-              <strong>Settings → Identity → Transfer to device</strong> and copy
-              the transfer code shown there.
-            </p>
-
             <textarea
               className="onboarding-key-input"
               placeholder="Paste transfer code here…"
               value={transferKey}
               onChange={e => { setTransferKey(e.target.value); setTransferKeyError(""); }}
               rows={3}
-              spellCheck={false}
             />
-
-            {transferKeyError && (
-              <div className="onboarding-error">{transferKeyError}</div>
-            )}
-
-            <button
-              className="btn btn-primary onboarding-btn"
-              onClick={submitTransferKey}
-              disabled={!transferKey.trim()}
-            >
+            {transferKeyError && <div className="onboarding-error">{transferKeyError}</div>}
+            <button className="btn btn-primary onboarding-btn" onClick={submitTransferKey} disabled={!transferKey.trim()}>
               Import identity
             </button>
           </>
         )}
 
-        {/* ── Generating / importing ── */}
+        {/* ── Generating / importing (Visible during invoke) ── */}
         {step === "generating" && (
           <div className="onboarding-loading">
             <div className="onboarding-spinner" />
@@ -271,13 +260,10 @@ export default function Onboarding({ onComplete }: Props) {
         {/* ── Set password ── */}
         {step === "set-password" && (
           <>
-            <div className="onboarding-step-icon">
-              <IconLock />
-            </div>
+            <div className="onboarding-step-icon"><IconLock /></div>
             <h1 className="onboarding-title">Protect your keys</h1>
             <p className="onboarding-text">
-              Set a password to encrypt your private keys. You will be asked for
-              this each time Axeno starts.
+              Set a password to encrypt your private keys.
             </p>
 
             <div className="onboarding-password-group">
@@ -289,12 +275,7 @@ export default function Onboarding({ onComplete }: Props) {
                 onChange={e => { setPassword(e.target.value); setPasswordError(""); }}
                 autoFocus
               />
-              <button
-                type="button"
-                className="onboarding-eye-btn"
-                onClick={() => setShowPassword(v => !v)}
-                aria-label={showPassword ? "Hide password" : "Show password"}
-              >
+              <button type="button" className="onboarding-eye-btn" onClick={() => setShowPassword(!showPassword)}>
                 {showPassword ? <IconEyeOff /> : <IconEye />}
               </button>
             </div>
@@ -307,20 +288,9 @@ export default function Onboarding({ onComplete }: Props) {
               onChange={e => { setConfirmPassword(e.target.value); setPasswordError(""); }}
             />
 
-            {passwordError && (
-              <div className="onboarding-error">{passwordError}</div>
-            )}
+            {passwordError && <div className="onboarding-error">{passwordError}</div>}
 
-            <p className="onboarding-fineprint">
-              If you forget this password, your keys cannot be recovered. There is
-              no reset option.
-            </p>
-
-            <button
-              className="btn btn-primary onboarding-btn"
-              onClick={submitPassword}
-              disabled={!password || !confirmPassword}
-            >
+            <button className="btn btn-primary onboarding-btn" onClick={submitPassword} disabled={!password || !confirmPassword}>
               Set password
             </button>
           </>
@@ -329,29 +299,17 @@ export default function Onboarding({ onComplete }: Props) {
         {/* ── Set profile ── */}
         {step === "set-profile" && (
           <>
-            <div className="onboarding-step-icon">
-              <IconUser />
-            </div>
+            <div className="onboarding-step-icon"><IconUser /></div>
             <h1 className="onboarding-title">Your display name</h1>
-            <p className="onboarding-text">
-              This is the name other people will see when you contact them.
-            </p>
-
             <input
               type="text"
               className="onboarding-name-input"
               placeholder="e.g. Alice"
               value={displayName}
               onChange={e => setDisplayName(e.target.value)}
-              maxLength={40}
               autoFocus
             />
-
-            <button
-              className="btn btn-primary onboarding-btn"
-              onClick={() => setStep("done")}
-              disabled={!displayName.trim()}
-            >
+            <button className="btn btn-primary onboarding-btn" onClick={() => setStep("done")} disabled={!displayName.trim()}>
               Continue
             </button>
           </>
@@ -360,15 +318,8 @@ export default function Onboarding({ onComplete }: Props) {
         {/* ── Done ── */}
         {step === "done" && (
           <>
-            <div className="onboarding-done-icon">
-              <IconCheck />
-            </div>
+            <div className="onboarding-done-icon"><IconCheck /></div>
             <h1 className="onboarding-title">You're ready</h1>
-            <p className="onboarding-text">
-              Your identity is set up and protected.
-            </p>
-
-
             <button className="btn btn-primary onboarding-btn" onClick={() => onComplete(displayName)}>
               Open Axeno
             </button>

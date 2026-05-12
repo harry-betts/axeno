@@ -5,16 +5,12 @@ description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "axeno_client_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
+# This was missing in the last turn!
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
@@ -23,3 +19,18 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Signal uses rand 0.8 and rand_core 0.6. 
+# We pin these to ensure trait compatibility for OsRng.
+rand = "0.8.5"
+rand_core = "0.6.4"
+libsignal-protocol = { git = "https://github.com/signalapp/libsignal", package = "libsignal-protocol" }
+
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+hex = "0.4"
+thiserror = "1"
+
+[patch.crates-io]
+# Required for Signal's specific elliptic curve math
+curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }
