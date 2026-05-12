@@ -2,7 +2,7 @@ import { useState } from "react";
 import { mockMyIdentity } from "../../mockData";
 import {
   IconCheck, IconKey, IconShield, IconQR,
-  IconLock, IconEye, IconEyeOff, IconSmartphone,
+  IconLock, IconEye, IconEyeOff, IconSmartphone, IconUser,
 } from "../icons";
 import "./Onboarding.css";
 
@@ -15,6 +15,7 @@ type Step =
   | "choice"
   | "generating"
   | "set-password"
+  | "set-profile"
   | "transfer-show"
   | "transfer-code"
   | "done";
@@ -79,6 +80,7 @@ export default function Onboarding({ onComplete }: Props) {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [displayName, setDisplayName] = useState("");
 
   const startNewIdentity = () => {
     setGeneratingFor("new");
@@ -89,7 +91,7 @@ export default function Onboarding({ onComplete }: Props) {
   const completeTransfer = () => {
     setGeneratingFor("transfer");
     setStep("generating");
-    setTimeout(() => setStep("done"), 1400);
+    setTimeout(() => setStep("set-password"), 1400);
   };
 
   const submitTransferKey = () => {
@@ -111,7 +113,7 @@ export default function Onboarding({ onComplete }: Props) {
       return;
     }
     setPasswordError("");
-    setStep("done");
+    setStep(generatingFor === "new" ? "set-profile" : "done");
   };
 
   const loadingText =
@@ -126,10 +128,10 @@ export default function Onboarding({ onComplete }: Props) {
         {/* ── Welcome ── */}
         {step === "welcome" && (
           <>
-            <div className="onboarding-brand">Axeno</div>
+            {/* <div className="onboarding-brand">Axeno</div> */}
             <h1 className="onboarding-title">Private by design</h1>
             <p className="onboarding-text">
-              Your identity lives only on your device — no accounts, no servers,
+              Your identity lives only on your device. No accounts, no servers,
               no recovery codes held by anyone but you.
             </p>
 
@@ -325,6 +327,37 @@ export default function Onboarding({ onComplete }: Props) {
           </>
         )}
 
+        {/* ── Set profile ── */}
+        {step === "set-profile" && (
+          <>
+            <div className="onboarding-step-icon">
+              <IconUser />
+            </div>
+            <h1 className="onboarding-title">Your display name</h1>
+            <p className="onboarding-text">
+              This is the name other people will see when you contact them.
+            </p>
+
+            <input
+              type="text"
+              className="onboarding-name-input"
+              placeholder="e.g. Alice"
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+              maxLength={40}
+              autoFocus
+            />
+
+            <button
+              className="btn btn-primary onboarding-btn"
+              onClick={() => setStep("done")}
+              disabled={!displayName.trim()}
+            >
+              Continue
+            </button>
+          </>
+        )}
+
         {/* ── Done ── */}
         {step === "done" && (
           <>
@@ -333,8 +366,7 @@ export default function Onboarding({ onComplete }: Props) {
             </div>
             <h1 className="onboarding-title">You're ready</h1>
             <p className="onboarding-text">
-              Your identity is set up and protected. Share your invite link from
-              Settings to start a conversation.
+              Your identity is set up and protected.
             </p>
 
 
