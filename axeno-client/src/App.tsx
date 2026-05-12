@@ -11,11 +11,18 @@ import VerifyIdentity from "./components/VerifyIdentity/VerifyIdentity";
 import { Contact, AppSettings, ServerChoice, defaultSettings } from "./types";
 import { mockContacts, mockMessages } from "./mockData";
 import "./App.css";
-import "./components/Onboarding/Onboarding.css"; 
+import "./components/Onboarding/Onboarding.css";
 
 interface UnlockResponse {
   fingerprint: string;
   display_name: string;
+}
+
+type TorStatus = "connecting" | "connected" | "failed";
+
+interface TorStatusEvent {
+  status: TorStatus;
+  reason?: string;
 }
 
 function computeInitials(name: string): string {
@@ -24,11 +31,11 @@ function computeInitials(name: string): string {
 
 export default function App() {
   const [appState, setAppState] = useState<"loading" | "onboarding" | "login" | "chat">("loading");
-  const [torStatus, setTorStatus] = useState<"connecting" | "connected" | "failed">("connecting");
-  
-  const [displayName, setDisplayName] = useState("My User");
-  const [activePassword, setActivePassword] = useState("");
-  
+  const [torStatus, setTorStatus] = useState<TorStatus>("connecting");
+  const [torError, setTorError] = useState<string>("");
+
+  const [displayName, setDisplayName] = useState("");
+
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [isUnlocking, setIsUnlocking] = useState(false);
@@ -37,25 +44,23 @@ export default function App() {
   const [activeContactId, setActiveContactId] = useState("ax7f2c");
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
 
-  const [showSettings, setShowSettings]     = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [showAddContact, setShowAddContact] = useState(false);
   const [showChatSettings, setShowChatSettings] = useState(false);
-  const [showVerify, setShowVerify]         = useState(false);
+  const [showVerify, setShowVerify] = useState(false);
 
   useEffect(() => {
-    // Listen for Tor background events emitted from Rust
-    const unlisten = listen<"connecting" | "connected" | "failed">("tor-status", (event) => {
-      setTorStatus(event.payload);
+    const unlisten = listen<TorStatusEvent>("tor-status", (event) => {
+      setTorStatus(event.payload.status);
+      setTorError(event.payload.reason ?? "");
     });
 
     const init = async () => {
       try {
         const exists = await invoke<boolean>("has_identity");
         setAppState(exists ? "login" : "onboarding");
-        
-        // Spawn Tor bootstrap in background
         await invoke("bootstrap_tor");
-      } catch (err) {
+      } catch {
         setAppState("onboarding");
       }
     };
@@ -71,9 +76,10 @@ export default function App() {
     try {
       const res = await invoke<UnlockResponse>("unlock_identity", { passphrase: loginPassword });
       setDisplayName(res.display_name);
-      setActivePassword(loginPassword); // Cache session password so we can re-encrypt settings changes later
+      // The password is consumed by the backend. Clear the React state immediately.
+      setLoginPassword("");
       setAppState("chat");
-    } catch (err) {
+    } catch {
       setLoginError("Incorrect password.");
     } finally {
       setIsUnlocking(false);
@@ -88,17 +94,16 @@ export default function App() {
 
   if (appState === "loading") {
     return (
-      <div className="app-root" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div className="onboarding-spinner" style={{ borderColor: 'var(--border)', borderTopColor: 'var(--brand)' }} />
+      <div className="app-root" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div className="onboarding-spinner" style={{ borderColor: "var(--border)", borderTopColor: "var(--brand)" }} />
       </div>
     );
   }
 
   if (appState === "onboarding") {
-    return <Onboarding onComplete={(name, password) => { 
-      setDisplayName(name); 
-      setActivePassword(password);
-      setAppState("chat"); 
+    return <Onboarding onComplete={(name) => {
+      setDisplayName(name);
+      setAppState("chat");
     }} />;
   }
 
@@ -106,8 +111,8 @@ export default function App() {
     return (
       <div className="onboarding-root">
         <div className="onboarding-card">
-          <h1 className="onboarding-title">Welcome Back</h1>
-          <form onSubmit={handleLogin} style={{ width: '100%' }}>
+          <h1 className="onboarding-title">Welcome back</h1>
+          <form onSubmit={handleLogin} style={{ width: "100%" }}>
             <input
               type="password"
               className="onboarding-key-input"
@@ -153,7 +158,8 @@ export default function App() {
           displayName={displayName}
           onChangeName={setDisplayName}
           onClose={() => setShowSettings(false)}
-          activePassword={activePassword}
+          torStatus={torStatus}
+          torError={torError}
         />
       )}
 

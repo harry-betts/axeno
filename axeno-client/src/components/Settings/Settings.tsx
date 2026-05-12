@@ -15,10 +15,13 @@ interface Props {
   onClose: () => void;
   displayName: string;
   onChangeName: (name: string) => void;
-  activePassword?: string;
+  torStatus: "connecting" | "connected" | "failed";
+  torError?: string;
 }
 
-export default function Settings({ settings, onChange, onClose, displayName, onChangeName, activePassword }: Props) {
+export default function Settings({
+  settings, onChange, onClose, displayName, onChangeName, torStatus, torError,
+}: Props) {
   const [section, setSection] = useState<Section>("identity");
 
   return (
@@ -32,23 +35,21 @@ export default function Settings({ settings, onChange, onClose, displayName, onC
 
       <div className="settings-layout">
         <nav className="settings-nav">
-          <NavItem icon={<IconKey />}    label="Identity"      active={section === "identity"}      onClick={() => setSection("identity")} />
-          <NavItem icon={<IconServer />} label="Servers"       active={section === "servers"}       onClick={() => setSection("servers")} />
-          <NavItem icon={<IconShield />} label="Privacy"       active={section === "privacy"}       onClick={() => setSection("privacy")} />
-          <NavItem icon={<IconBell />}   label="Notifications" active={section === "notifications"} onClick={() => setSection("notifications")} />
-          <NavItem icon={<IconEye />}    label="Appearance"    active={section === "appearance"}    onClick={() => setSection("appearance")} />
-          {/* <NavItem icon={<IconShield />} label="Advanced"      active={section === "advanced"}      onClick={() => setSection("advanced")} /> */}
-          <NavItem icon={<IconInfo />}   label="About"         active={section === "about"}         onClick={() => setSection("about")} />
+          <NavItem icon={<IconKey />} label="Identity" active={section === "identity"} onClick={() => setSection("identity")} />
+          <NavItem icon={<IconServer />} label="Servers" active={section === "servers"} onClick={() => setSection("servers")} />
+          <NavItem icon={<IconShield />} label="Privacy" active={section === "privacy"} onClick={() => setSection("privacy")} />
+          <NavItem icon={<IconBell />} label="Notifications" active={section === "notifications"} onClick={() => setSection("notifications")} />
+          <NavItem icon={<IconEye />} label="Appearance" active={section === "appearance"} onClick={() => setSection("appearance")} />
+          <NavItem icon={<IconInfo />} label="About" active={section === "about"} onClick={() => setSection("about")} />
         </nav>
 
         <main className="settings-content">
-          {section === "identity"      && <IdentitySection displayName={displayName} onChangeName={onChangeName} activePassword={activePassword} inviteCodes={settings.inviteCodes} onChangeInviteCodes={(inviteCodes) => onChange({ ...settings, inviteCodes: inviteCodes })} />}
-          {section === "servers"       && <ServersSection settings={settings} onChange={onChange} />}
-          {section === "privacy"       && <PrivacySection settings={settings} onChange={onChange} />}
+          {section === "identity" && <IdentitySection displayName={displayName} onChangeName={onChangeName} inviteCodes={settings.inviteCodes} onChangeInviteCodes={(inviteCodes) => onChange({ ...settings, inviteCodes })} />}
+          {section === "servers" && <ServersSection settings={settings} onChange={onChange} />}
+          {section === "privacy" && <PrivacySection settings={settings} onChange={onChange} />}
           {section === "notifications" && <NotificationsSection settings={settings} onChange={onChange} />}
-          {section === "appearance"    && <AppearanceSection settings={settings} onChange={onChange} />}
-          {/* {section === "advanced"      && <AdvancedSection settings={settings} onChange={onChange} />} */}
-          {section === "about"         && <AboutSection />}
+          {section === "appearance" && <AppearanceSection settings={settings} onChange={onChange} />}
+          {section === "about" && <AboutSection torStatus={torStatus} torError={torError} />}
         </main>
       </div>
     </div>
@@ -125,34 +126,42 @@ function computeInitials(name: string): string {
   return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
 }
 
-function IdentitySection({ displayName, onChangeName, activePassword, inviteCodes, onChangeInviteCodes }: {
+function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInviteCodes }: {
   displayName: string;
   onChangeName: (name: string) => void;
-  activePassword?: string;
   inviteCodes: InviteCode[];
   onChangeInviteCodes: (inviteCodes: InviteCode[]) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(displayName);
   const [copied, setCopied] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string>("");
+
+  // Change-password modal state
+  const [showPwModal, setShowPwModal] = useState(false);
+  const [newPw, setNewPw] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
 
   const saveName = async () => {
     const trimmed = draft.trim();
-    if (trimmed) {
+    if (!trimmed) { setEditing(false); return; }
+    setSaveError("");
+    try {
+      // The backend operates on the unlocked session. No passphrase passed
+      // from the frontend — the KEK lives in Rust memory.
+      await invoke("update_display_name", { newName: trimmed });
       onChangeName(trimmed);
-      if (activePassword) {
-        try {
-          await invoke("update_display_name", { passphrase: activePassword, newName: trimmed });
-        } catch (e) {
-          console.error("Failed to save name securely:", e);
-        }
-      }
+      setEditing(false);
+    } catch (e) {
+      setSaveError(typeof e === "string" ? e : "Could not save name");
     }
-    setEditing(false);
   };
 
   const cancelEdit = () => {
     setDraft(displayName);
+    setSaveError("");
     setEditing(false);
   };
 
@@ -169,6 +178,23 @@ function IdentitySection({ displayName, onChangeName, activePassword, inviteCode
     navigator.clipboard.writeText(code);
     setCopied(id);
     setTimeout(() => setCopied(null), 1500);
+  };
+
+  const submitNewPassword = async () => {
+    if (newPw.length < 8) { setPwError("Password must be at least 8 characters."); return; }
+    if (newPw !== confirmPw) { setPwError("Passwords do not match."); return; }
+    setPwError("");
+    setPwBusy(true);
+    try {
+      await invoke("change_password", { newPassphrase: newPw });
+      setShowPwModal(false);
+      setNewPw("");
+      setConfirmPw("");
+    } catch (e) {
+      setPwError(typeof e === "string" ? e : "Failed to change password.");
+    } finally {
+      setPwBusy(false);
+    }
   };
 
   return (
@@ -193,6 +219,7 @@ function IdentitySection({ displayName, onChangeName, activePassword, inviteCode
                 <button className="btn btn-primary" onClick={saveName} disabled={!draft.trim()}>Save</button>
                 <button className="btn btn-secondary" onClick={cancelEdit}>Cancel</button>
               </div>
+              {saveError && <div className="onboarding-error" style={{ marginTop: 8 }}>{saveError}</div>}
             </div>
           ) : (
             <div className="identity-name-row">
@@ -207,7 +234,8 @@ function IdentitySection({ displayName, onChangeName, activePassword, inviteCode
 
       <div className="inviteCodes-block">
         <div className="inviteCodes-block-header">
-          <div className="inviteCodes-block-title">Connection inviteCodes</div>
+          {/* This header will now be styled as a bold sub-section */}
+          <div className="inviteCodes-block-title">Connection Codes</div>
           <div className="inviteCodes-block-desc">
             Share a code with someone so they can start a conversation with you.
             Generate as many as you need and delete them whenever you like.
@@ -216,7 +244,7 @@ function IdentitySection({ displayName, onChangeName, activePassword, inviteCode
 
         <div className="code-list">
           {inviteCodes.length === 0 && (
-            <div className="code-empty">No connection inviteCodes. Generate one below.</div>
+            <div className="code-empty">No connection codes. Generate one below.</div>
           )}
           {inviteCodes.map(c => (
             <div className="code-item" key={c.id}>
@@ -244,16 +272,54 @@ function IdentitySection({ displayName, onChangeName, activePassword, inviteCode
         <button className="btn btn-secondary inviteCodes-generate-btn" onClick={addCode}>
           <IconPlus /> Generate new code
         </button>
-      </div>
+      </div>      <Row
+        label="Change password"
+        description="Set a new password for encrypting your vault. Your private keys are re-encrypted with the new password."
+        control={<button className="btn btn-secondary" onClick={() => setShowPwModal(true)}>Change…</button>}
+      />
 
       <div className="danger-zone">
         <div className="danger-zone-label">Danger zone</div>
         <Row
           label="Regenerate identity"
           description="Creates a new keypair and deletes the old one. All existing data will be lost (contacts, messages, etc)."
-          control={<button className="btn btn-danger">Start Over</button>}
+          control={<button className="btn btn-danger">Start over</button>}
         />
       </div>
+
+      {showPwModal && (
+        <div className="settings-modal-backdrop" onClick={() => !pwBusy && setShowPwModal(false)}>
+          <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="settings-modal-title">Change password</h3>
+            <p className="settings-modal-desc">
+              Your vault will be re-encrypted with the new password. You will need this
+              password to unlock Axeno next time.
+            </p>
+            <input
+              type="password"
+              className="text-input"
+              placeholder="New password"
+              value={newPw}
+              onChange={(e) => { setNewPw(e.target.value); setPwError(""); }}
+              autoFocus
+            />
+            <input
+              type="password"
+              className="text-input"
+              placeholder="Confirm new password"
+              value={confirmPw}
+              onChange={(e) => { setConfirmPw(e.target.value); setPwError(""); }}
+            />
+            {pwError && <div className="onboarding-error">{pwError}</div>}
+            <div className="button-row">
+              <button className="btn btn-primary" onClick={submitNewPassword} disabled={pwBusy || !newPw || !confirmPw}>
+                {pwBusy ? "Saving…" : "Save"}
+              </button>
+              <button className="btn btn-secondary" onClick={() => setShowPwModal(false)} disabled={pwBusy}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </Section>
   );
 }
@@ -289,7 +355,7 @@ function ServersSection({ settings, onChange }: { settings: AppSettings; onChang
 
   return (
     <Section
-      title="Select Default Server"
+      title="Select default server"
       description="Choose where messages addressed to you are stored. The official servers are operated by the Axeno project and route everything through Tor. Self-hosted servers give you full sovereignty over your message queues. Selecting a default server here will only apply to new chats. You may still change the server inside the server settings of each individual chat."
     >
       <div className="server-list">
@@ -380,9 +446,9 @@ function PrivacySection({ settings, onChange }: { settings: AppSettings; onChang
           <Select
             value={String(settings.defaultDisappearingMessages) as any}
             options={[
-              { value: "0",      label: "Off" },
-              { value: "3600",   label: "1 hour" },
-              { value: "86400",  label: "1 day" },
+              { value: "0", label: "Off" },
+              { value: "3600", label: "1 hour" },
+              { value: "86400", label: "1 day" },
               { value: "604800", label: "7 days" },
               { value: "2592000", label: "30 days" },
             ]}
@@ -427,9 +493,9 @@ function AppearanceSection({ settings, onChange }: { settings: AppSettings; onCh
           <Select
             value={settings.messageTextSize}
             options={[
-              { value: "small",  label: "Small" },
+              { value: "small", label: "Small" },
               { value: "medium", label: "Medium" },
-              { value: "large",  label: "Large" },
+              { value: "large", label: "Large" },
             ]}
             onChange={(v) => onChange({ ...settings, messageTextSize: v })}
           />
@@ -444,7 +510,11 @@ function AppearanceSection({ settings, onChange }: { settings: AppSettings; onCh
   );
 }
 
-function AboutSection() {
+function AboutSection({ torStatus, torError }: { torStatus: "connecting" | "connected" | "failed"; torError?: string }) {
+  const torLabel =
+    torStatus === "connected" ? "Connected" :
+      torStatus === "connecting" ? "Bootstrapping…" :
+        `Failed${torError ? `: ${torError}` : ""}`;
   return (
     <Section title="About">
       <div className="about-block">
@@ -452,6 +522,7 @@ function AboutSection() {
         <div className="about-row"><span>Build</span><span className="mono">7f3c9a2</span></div>
         <div className="about-row"><span>Protocol</span><span>Signal Protocol with PQXDH</span></div>
         <div className="about-row"><span>Transport</span><span>Tor (arti embedded)</span></div>
+        <div className="about-row"><span>Tor status</span><span>{torLabel}</span></div>
       </div>
       <div className="button-row">
         <button className="btn btn-secondary">View source</button>
