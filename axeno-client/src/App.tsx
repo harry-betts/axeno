@@ -7,11 +7,16 @@ import AddContact from "./components/AddContact/AddContact";
 import Onboarding from "./components/Onboarding/Onboarding";
 import VerifyIdentity from "./components/VerifyIdentity/VerifyIdentity";
 import { Contact, AppSettings, ServerChoice, defaultSettings } from "./types";
-import { mockContacts, mockMessages, mockMyIdentity } from "./mockData";
+import { mockContacts, mockMessages } from "./mockData";
 import "./App.css";
+
+function computeInitials(name: string): string {
+  return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
+}
 
 export default function App() {
   const [identityCreated, setIdentityCreated] = useState(false);
+  const [displayName, setDisplayName] = useState("");
   const [contacts, setContacts] = useState<Contact[]>(mockContacts);
   const [activeContactId, setActiveContactId] = useState("ax7f2c");
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
@@ -22,7 +27,7 @@ export default function App() {
   const [showVerify, setShowVerify]         = useState(false);
 
   if (!identityCreated) {
-    return <Onboarding onComplete={() => setIdentityCreated(true)} />;
+    return <Onboarding onComplete={(name) => { setDisplayName(name); setIdentityCreated(true); }} />;
   }
 
   const active = contacts.find(c => c.id === activeContactId)!;
@@ -41,8 +46,8 @@ export default function App() {
         onSelectContact={setActiveContactId}
         onOpenAddContact={() => setShowAddContact(true)}
         onOpenSettings={() => setShowSettings(true)}
-        myShortKey={mockMyIdentity.shortKey}
-        myInitials={mockMyIdentity.initials}
+        myInitials={computeInitials(displayName)}
+        myDisplayName={displayName}
       />
 
       <ChatView
@@ -55,6 +60,8 @@ export default function App() {
         <Settings
           settings={settings}
           onChange={setSettings}
+          displayName={displayName}
+          onChangeName={setDisplayName}
           onClose={() => setShowSettings(false)}
         />
       )}

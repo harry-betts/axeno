@@ -32,6 +32,4 @@ export const mockMessages: Record<string, Message[]> = {
 
 export const mockMyIdentity = {
   initials: "HB",
-  fingerprint: "hb3f9c2a8d4e1b7f5c8a2d6e9b1f4c7a3e5d8b2c6f9a1d4e7b3c8f5a2d9e6b1c4a",
-  shortKey: "hb3f9...a2c1",
 };

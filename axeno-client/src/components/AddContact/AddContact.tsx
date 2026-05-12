@@ -1,25 +1,13 @@
 import { useState } from "react";
-import { mockMyIdentity } from "../../mockData";
-import { IconX, IconCopy, IconQR, IconLink, IconCheck } from "../icons";
+import { IconX } from "../icons";
 import "./AddContact.css";
 
 interface Props {
   onClose: () => void;
 }
 
-type Tab = "share" | "add";
-
 export default function AddContact({ onClose }: Props) {
-  const [tab, setTab] = useState<Tab>("share");
-  const [inviteLink, setInviteLink] = useState("");
-  const [copied, setCopied] = useState(false);
-
-  const myInviteLink = `axeno://contact/${mockMyIdentity.fingerprint.slice(0, 32)}`;
-
-  const handleCopy = () => {
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
+  const [code, setCode] = useState("");
 
   return (
     <>
@@ -32,70 +20,26 @@ export default function AddContact({ onClose }: Props) {
           </button>
         </header>
 
-        <div className="add-contact-tabs">
-          <button
-            className={`add-contact-tab ${tab === "share" ? "active" : ""}`}
-            onClick={() => setTab("share")}
-          >
-            Share your invite
-          </button>
-          <button
-            className={`add-contact-tab ${tab === "add" ? "active" : ""}`}
-            onClick={() => setTab("add")}
-          >
-            Add from invite
-          </button>
-        </div>
-
         <div className="modal-body">
-          {tab === "share" ? (
-            <>
-              <p className="add-contact-desc">
-                Share this invite link with someone you want to talk to. Send it over a channel you trust.
-              </p>
+          <p className="add-contact-desc">
+            Enter the connection code you received from someone to start a conversation.
+          </p>
 
-              <div className="qr-placeholder">
-                <IconQR />
-                <span>QR code preview</span>
-              </div>
+          <input
+            type="text"
+            className="text-input mono add-contact-input"
+            placeholder="axn-xxxx-xxxx-xxxx"
+            value={code}
+            onChange={e => setCode(e.target.value)}
+            autoFocus
+            spellCheck={false}
+          />
 
-              <div className="invite-link-wrap">
-                <div className="invite-link">{myInviteLink}</div>
-                <button className="btn btn-secondary" onClick={handleCopy}>
-                  {copied ? <><IconCheck /> Copied</> : <><IconCopy /> Copy</>}
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="add-contact-desc">
-                Paste an invite link you received, or scan a QR code.
-              </p>
-
-              <div className="invite-input-wrap">
-                <span className="invite-input-icon"><IconLink /></span>
-                <input
-                  type="text"
-                  className="text-input mono invite-input"
-                  placeholder="axeno://contact/..."
-                  value={inviteLink}
-                  onChange={(e) => setInviteLink(e.target.value)}
-                />
-              </div>
-
-              <div className="add-contact-or">or</div>
-
-              <button className="btn btn-secondary full">
-                <IconQR /> Scan QR code
-              </button>
-
-              <div className="add-contact-actions">
-                <button className="btn btn-primary" disabled={!inviteLink.trim()}>
-                  Add contact
-                </button>
-              </div>
-            </>
-          )}
+          <div className="add-contact-actions">
+            <button className="btn btn-primary" disabled={!code.trim()}>
+              Add contact
+            </button>
+          </div>
         </div>
       </div>
     </>

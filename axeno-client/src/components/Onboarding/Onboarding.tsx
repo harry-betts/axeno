@@ -1,13 +1,12 @@
 import { useState } from "react";
-import { mockMyIdentity } from "../../mockData";
 import {
-  IconCheck, IconKey, IconShield, IconQR,
+  IconCheck, IconKey, IconShield,
   IconLock, IconEye, IconEyeOff, IconSmartphone, IconUser,
 } from "../icons";
 import "./Onboarding.css";
 
 interface Props {
-  onComplete: () => void;
+  onComplete: (displayName: string) => void;
 }
 
 type Step =
@@ -370,7 +369,7 @@ export default function Onboarding({ onComplete }: Props) {
             </p>
 
 
-            <button className="btn btn-primary onboarding-btn" onClick={onComplete}>
+            <button className="btn btn-primary onboarding-btn" onClick={() => onComplete(displayName)}>
               Open Axeno
             </button>
           </>

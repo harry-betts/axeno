@@ -8,14 +8,14 @@ interface Props {
   onSelectContact: (id: string) => void;
   onOpenAddContact: () => void;
   onOpenSettings: () => void;
-  myShortKey: string;
   myInitials: string;
+  myDisplayName: string;
 }
 
 export default function Sidebar({
   contacts, activeContactId, onSelectContact,
   onOpenAddContact, onOpenSettings,
-  myShortKey, myInitials,
+  myInitials, myDisplayName,
 }: Props) {
   return (
     <aside className="sidebar">
@@ -53,7 +53,7 @@ export default function Sidebar({
 
       <div className="sidebar-footer">
         <div className="me-avatar">{myInitials}</div>
-        <span className="me-key">{myShortKey}</span>
+        <span className="me-name">{myDisplayName}</span>
         <button className="icon-button" onClick={onOpenAddContact} aria-label="Add contact">
           <IconPlus />
         </button>

@@ -1,21 +1,22 @@
 import { useState } from "react";
 import { AppSettings, PrivateServer, ServerChoice } from "../../types";
-import { mockMyIdentity } from "../../mockData";
 import {
   IconArrowLeft, IconKey, IconServer, IconShield, IconBell, IconEye,
-  IconInfo, IconCopy, IconPlus, IconTrash, IconCheck, IconChevronDown,
+  IconInfo, IconCopy, IconPlus, IconTrash, IconCheck, IconChevronDown, IconEdit,
 } from "../icons";
 import "./Settings.css";
 
-type Section = "identity" | "servers" | "privacy" | "notifications" | "appearance" | "advanced" | "about";
+type Section = "identity" | "servers" | "privacy" | "notifications" | "appearance" | "about";
 
 interface Props {
   settings: AppSettings;
   onChange: (settings: AppSettings) => void;
   onClose: () => void;
+  displayName: string;
+  onChangeName: (name: string) => void;
 }
 
-export default function Settings({ settings, onChange, onClose }: Props) {
+export default function Settings({ settings, onChange, onClose, displayName, onChangeName }: Props) {
   const [section, setSection] = useState<Section>("identity");
 
   return (
@@ -34,17 +35,17 @@ export default function Settings({ settings, onChange, onClose }: Props) {
           <NavItem icon={<IconShield />} label="Privacy"       active={section === "privacy"}       onClick={() => setSection("privacy")} />
           <NavItem icon={<IconBell />}   label="Notifications" active={section === "notifications"} onClick={() => setSection("notifications")} />
           <NavItem icon={<IconEye />}    label="Appearance"    active={section === "appearance"}    onClick={() => setSection("appearance")} />
-          <NavItem icon={<IconShield />} label="Advanced"      active={section === "advanced"}      onClick={() => setSection("advanced")} />
+          {/* <NavItem icon={<IconShield />} label="Advanced"      active={section === "advanced"}      onClick={() => setSection("advanced")} /> */}
           <NavItem icon={<IconInfo />}   label="About"         active={section === "about"}         onClick={() => setSection("about")} />
         </nav>
 
         <main className="settings-content">
-          {section === "identity"      && <IdentitySection />}
+          {section === "identity"      && <IdentitySection displayName={displayName} onChangeName={onChangeName} />}
           {section === "servers"       && <ServersSection settings={settings} onChange={onChange} />}
           {section === "privacy"       && <PrivacySection settings={settings} onChange={onChange} />}
           {section === "notifications" && <NotificationsSection settings={settings} onChange={onChange} />}
           {section === "appearance"    && <AppearanceSection settings={settings} onChange={onChange} />}
-          {section === "advanced"      && <AdvancedSection settings={settings} onChange={onChange} />}
+          {/* {section === "advanced"      && <AdvancedSection settings={settings} onChange={onChange} />} */}
           {section === "about"         && <AboutSection />}
         </main>
       </div>
@@ -111,31 +112,137 @@ function Select<T extends string>({ value, options, onChange }: { value: T; opti
 
 // ---------- Sections ----------
 
-function IdentitySection() {
+interface ConnectionCode {
+  id: string;
+  code: string;
+}
+
+function generateCode(): string {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const rand = (n: number) =>
+    Array.from({ length: n }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  return `axn-${rand(4)}-${rand(4)}-${rand(4)}`;
+}
+
+function computeInitials(name: string): string {
+  return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
+}
+
+function IdentitySection({ displayName, onChangeName }: { displayName: string; onChangeName: (name: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(displayName);
+
+  const [codes, setCodes] = useState<ConnectionCode[]>(() => [
+    { id: "initial", code: generateCode() },
+  ]);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const saveName = () => {
+    const trimmed = draft.trim();
+    if (trimmed) onChangeName(trimmed);
+    setEditing(false);
+  };
+
+  const cancelEdit = () => {
+    setDraft(displayName);
+    setEditing(false);
+  };
+
+  const addCode = () => {
+    setCodes(prev => [...prev, { id: `${Date.now()}`, code: generateCode() }]);
+  };
+
+  const removeCode = (id: string) => {
+    setCodes(prev => prev.filter(c => c.id !== id));
+  };
+
+  const copyCode = (id: string, code: string) => {
+    navigator.clipboard.writeText(code);
+    setCopied(id);
+    setTimeout(() => setCopied(null), 1500);
+  };
+
   return (
     <Section
       title="Identity"
       description="Your identity is a cryptographic keypair generated on this device. It is never shared with the server and never recoverable if lost."
     >
       <div className="identity-card">
-        <div className="identity-avatar">{mockMyIdentity.initials}</div>
-        <div className="identity-fingerprint-block">
-          <div className="identity-label">Public key fingerprint</div>
-          <div className="identity-fingerprint">{mockMyIdentity.fingerprint}</div>
+        <div className="identity-avatar">{computeInitials(displayName)}</div>
+        <div className="identity-info">
+          {editing ? (
+            <div className="identity-name-edit">
+              <input
+                className="text-input identity-name-input"
+                value={draft}
+                onChange={e => setDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") saveName(); if (e.key === "Escape") cancelEdit(); }}
+                autoFocus
+                maxLength={40}
+              />
+              <div className="identity-name-edit-actions">
+                <button className="btn btn-primary" onClick={saveName} disabled={!draft.trim()}>Save</button>
+                <button className="btn btn-secondary" onClick={cancelEdit}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <div className="identity-name-row">
+              <span className="identity-name">{displayName}</span>
+              <button className="identity-edit-btn" onClick={() => { setDraft(displayName); setEditing(true); }} title="Change name">
+                <IconEdit />
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
-      <div className="button-row">
-        <button className="btn btn-secondary"><IconCopy /> Copy contact link</button>
-        <button className="btn btn-secondary"><IconCopy /> Copy fingerprint</button>
+      <div className="codes-block">
+        <div className="codes-block-header">
+          <div className="codes-block-title">Connection codes</div>
+          <div className="codes-block-desc">
+            Share a code with someone so they can start a conversation with you.
+            Generate as many as you need and delete them whenever you like.
+          </div>
+        </div>
+
+        <div className="code-list">
+          {codes.length === 0 && (
+            <div className="code-empty">No connection codes. Generate one below.</div>
+          )}
+          {codes.map(c => (
+            <div className="code-item" key={c.id}>
+              <span className="code-string">{c.code}</span>
+              <div className="code-actions">
+                <button
+                  className="code-action-btn"
+                  onClick={() => copyCode(c.id, c.code)}
+                  title="Copy code"
+                >
+                  {copied === c.id ? <IconCheck /> : <IconCopy />}
+                </button>
+                <button
+                  className="code-action-btn danger"
+                  onClick={() => removeCode(c.id)}
+                  title="Delete code"
+                >
+                  <IconTrash />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <button className="btn btn-secondary codes-generate-btn" onClick={addCode}>
+          <IconPlus /> Generate new code
+        </button>
       </div>
 
       <div className="danger-zone">
         <div className="danger-zone-label">Danger zone</div>
         <Row
           label="Regenerate identity"
-          description="Creates a new keypair. All existing contacts will need to verify you again. This cannot be undone."
-          control={<button className="btn btn-danger">Regenerate</button>}
+          description="Creates a new keypair and deletes the old one. All existing data will be lost (contacts, messages, etc)."
+          control={<button className="btn btn-danger">Start Over</button>}
         />
       </div>
     </Section>
@@ -173,8 +280,8 @@ function ServersSection({ settings, onChange }: { settings: AppSettings; onChang
 
   return (
     <Section
-      title="Servers"
-      description="Choose where messages addressed to you are stored. The official servers are operated by the Axeno project and route everything through Tor. Self-hosted servers give you full sovereignty over your message queues."
+      title="Select Default Server"
+      description="Choose where messages addressed to you are stored. The official servers are operated by the Axeno project and route everything through Tor. Self-hosted servers give you full sovereignty over your message queues. Selecting a default server here will only apply to new chats. You may still change the server inside the server settings of each individual chat."
     >
       <div className="server-list">
         <ServerOption
@@ -274,6 +381,23 @@ function PrivacySection({ settings, onChange }: { settings: AppSettings; onChang
           />
         }
       />
+            <Row
+        label="Local message retention"
+        description="How long undelivered messages are kept on the relay before being dropped."
+        control={
+          <Select
+            value={String(settings.messageRetentionDays) as any}
+            options={[
+              { value: "7",  label: "7 days" },
+              { value: "14", label: "14 days" },
+              { value: "30", label: "30 days" },
+              { value: "60", label: "60 days" },
+            ]}
+            onChange={(v) => onChange({ ...settings, messageRetentionDays: parseInt(v) })}
+          />
+        }
+      />
+
     </Section>
   );
 }
@@ -328,41 +452,12 @@ function AppearanceSection({ settings, onChange }: { settings: AppSettings; onCh
   );
 }
 
-function AdvancedSection({ settings, onChange }: { settings: AppSettings; onChange: (s: AppSettings) => void }) {
-  return (
-    <Section title="Advanced">
-      <Row
-        label="Local message retention"
-        description="How long undelivered messages are kept on the relay before being dropped."
-        control={
-          <Select
-            value={String(settings.messageRetentionDays) as any}
-            options={[
-              { value: "7",  label: "7 days" },
-              { value: "14", label: "14 days" },
-              { value: "30", label: "30 days" },
-              { value: "60", label: "60 days" },
-            ]}
-            onChange={(v) => onChange({ ...settings, messageRetentionDays: parseInt(v) })}
-          />
-        }
-      />
-      <div className="danger-zone">
-        <div className="danger-zone-label">Danger zone</div>
-        <Row
-          label="Export identity backup"
-          description="Encrypted with a passphrase you choose. Required to migrate this identity to another device."
-          control={<button className="btn btn-secondary">Export</button>}
-        />
-        <Row
-          label="Clear local data"
-          description="Removes all local message history. Does not affect undelivered messages on relays."
-          control={<button className="btn btn-danger">Clear</button>}
-        />
-      </div>
-    </Section>
-  );
-}
+// function AdvancedSection({ settings, onChange }: { settings: AppSettings; onChange: (s: AppSettings) => void }) {
+//   return (
+//     <Section title="Advanced">
+//     </Section>
+//   );
+// }
 
 function AboutSection() {
   return (

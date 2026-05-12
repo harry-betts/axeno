@@ -320,25 +320,144 @@
   flex-shrink: 0;
 }
 
-.identity-fingerprint-block {
+.identity-info {
   flex: 1;
   min-width: 0;
 }
 
-.identity-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  margin-bottom: 4px;
+.identity-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.identity-fingerprint {
-  font-family: var(--font-mono);
-  font-size: 12px;
+.identity-name {
+  font-size: 15px;
+  font-weight: 600;
   color: var(--text-bright);
-  word-break: break-all;
-  line-height: 1.4;
+}
+
+.identity-edit-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  transition: background 0.12s, color 0.12s;
+}
+
+.identity-edit-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
+
+.identity-name-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.identity-name-input {
+  width: 100%;
+  font-size: 14px;
+}
+
+.identity-name-edit-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Connection codes */
+
+.codes-block {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.codes-block-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.codes-block-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+.codes-block-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.code-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.code-empty {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  padding: 14px 0;
+}
+
+.code-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+.code-string {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-bright);
+  letter-spacing: 0.04em;
+}
+
+.code-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.code-action-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 5px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s, color 0.12s;
+}
+
+.code-action-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
+
+.code-action-btn.danger:hover {
+  background: var(--accent-red-dim);
+  color: var(--accent-red);
+}
+
+.codes-generate-btn {
+  align-self: flex-start;
 }
 
 /* Danger zone */
