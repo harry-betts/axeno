@@ -1,0 +1,449 @@
+.onboarding-root {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-base);
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+}
+
+.onboarding-card {
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+}
+
+.onboarding-brand {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: -0.01em;
+  margin-bottom: 32px;
+}
+
+.onboarding-title {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-bright);
+  letter-spacing: -0.02em;
+  margin-bottom: 10px;
+}
+
+.onboarding-text {
+  font-size: 13.5px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 24px;
+}
+
+.onboarding-text strong {
+  color: var(--text-bright);
+  font-weight: 500;
+}
+
+.onboarding-points {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 28px;
+}
+
+.onboarding-point {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.onboarding-point-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.onboarding-point-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-bright);
+  margin-bottom: 2px;
+}
+
+.onboarding-point-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.onboarding-btn {
+  padding: 9px 18px;
+  font-size: 13px;
+  align-self: flex-start;
+}
+
+.onboarding-fineprint {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  margin-top: 16px;
+  line-height: 1.55;
+}
+
+/* Choices */
+
+.onboarding-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.onboarding-choice {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-sans);
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.onboarding-choice:hover {
+  background: var(--bg-elevated-2);
+  border-color: var(--border-default);
+}
+
+.onboarding-choice-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.onboarding-choice-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.onboarding-choice-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-bright);
+  margin-bottom: 2px;
+}
+
+.onboarding-choice-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.onboarding-choice-arrow {
+  font-size: 18px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+/* Back button */
+
+.onboarding-back {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: color 0.12s;
+}
+
+.onboarding-back:hover {
+  color: var(--text-bright);
+}
+
+/* QR viewfinder */
+
+.qr-viewfinder {
+  width: 220px;
+  height: 220px;
+  margin: 0 auto 20px;
+  background: var(--bg-elevated);
+  border-radius: 12px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.qr-viewfinder-label {
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+}
+
+.qr-viewfinder-corner {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+.qr-viewfinder-corner.tl { top: 14px; left: 14px; border-width: 2px 0 0 2px; border-radius: 3px 0 0 0; }
+.qr-viewfinder-corner.tr { top: 14px; right: 14px; border-width: 2px 2px 0 0; border-radius: 0 3px 0 0; }
+.qr-viewfinder-corner.bl { bottom: 14px; left: 14px; border-width: 0 0 2px 2px; border-radius: 0 0 0 3px; }
+.qr-viewfinder-corner.br { bottom: 14px; right: 14px; border-width: 0 2px 2px 0; border-radius: 0 0 3px 0; }
+
+/* Manual key input */
+
+.onboarding-key-input {
+  width: 100%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: var(--text-bright);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+  margin-bottom: 12px;
+  transition: border-color 0.12s;
+}
+
+.onboarding-key-input:focus {
+  border-color: var(--accent);
+}
+
+.onboarding-key-input::placeholder {
+  color: var(--text-faint);
+}
+
+.onboarding-error {
+  font-size: 12px;
+  color: var(--accent-red);
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
+/* Loading */
+
+.onboarding-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 60px 0;
+}
+
+.onboarding-spinner {
+  width: 32px;
+  height: 32px;
+  border: 2px solid var(--border-subtle);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.onboarding-loading-text {
+  font-size: 13px;
+  color: var(--text-bright);
+  font-weight: 500;
+}
+
+.onboarding-loading-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Done */
+
+.onboarding-done-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--accent-dim);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 18px;
+}
+
+.onboarding-done-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.onboarding-key-preview {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 22px;
+}
+
+.onboarding-key-label {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+
+.onboarding-key-value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-bright);
+  letter-spacing: -0.01em;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Step icon (neutral, pre-done state) */
+
+.onboarding-step-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 18px;
+}
+
+.onboarding-step-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* QR code display */
+
+.qr-code-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 0 auto 20px;
+  padding: 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  width: fit-content;
+}
+
+/* Transfer code row (below QR) */
+
+.onboarding-transfer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+}
+
+.onboarding-transfer-code {
+  flex: 1;
+  min-width: 0;
+}
+
+.onboarding-qr-icon {
+  color: var(--text-faint);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: 12px;
+}
+
+.onboarding-qr-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Link-style button (secondary action) */
+
+.onboarding-link-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  padding: 0;
+  margin-top: 12px;
+  transition: color 0.12s;
+  text-align: left;
+}
+
+.onboarding-link-btn:hover {
+  color: var(--text-bright);
+}
+
+/* Password field with show/hide toggle */
+
+.onboarding-password-group {
+  position: relative;
+  margin-bottom: 0;
+}
+
+.onboarding-password-group .onboarding-key-input {
+  padding-right: 40px;
+  margin-bottom: 8px;
+}
+
+.onboarding-eye-btn {
+  position: absolute;
+  right: 12px;
+  top: 14px;
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  transition: color 0.12s;
+}
+
+.onboarding-eye-btn:hover {
+  color: var(--text-muted);
+}
+
+.onboarding-eye-btn svg {
+  width: 15px;
+  height: 15px;
+}

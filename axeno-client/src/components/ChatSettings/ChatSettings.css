@@ -1,0 +1,209 @@
+.chat-settings-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 50;
+  animation: fade-in 0.15s ease-out;
+}
+
+.chat-settings-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 340px;
+  background: var(--bg-base);
+  border-left: 1px solid var(--border-subtle);
+  z-index: 51;
+  display: flex;
+  flex-direction: column;
+  animation: slide-in-right 0.18s ease-out;
+}
+
+@keyframes slide-in-right {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+
+.chat-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.chat-settings-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-bright);
+  letter-spacing: -0.01em;
+}
+
+.chat-settings-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s, color 0.12s;
+}
+
+.chat-settings-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
+
+.chat-settings-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 22px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.chat-settings-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0 12px;
+}
+
+.chat-settings-avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--bg-avatar);
+  color: var(--text-bright);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.chat-settings-contact-id {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-bright);
+  word-break: break-all;
+  text-align: center;
+  letter-spacing: -0.01em;
+}
+
+.chat-settings-action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-settings-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-sans);
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.chat-settings-action:hover {
+  background: var(--bg-elevated-2);
+  border-color: var(--border-default);
+}
+
+.chat-settings-action-icon {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+
+.chat-settings-action-label {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-bright);
+}
+
+.chat-settings-action-status {
+  font-size: 11.5px;
+  color: var(--accent-amber);
+}
+
+.chat-settings-action-chevron {
+  display: flex;
+  color: var(--text-muted);
+}
+
+.chat-settings-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+
+.chat-settings-section-desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.chat-settings-select-wrap {
+  width: 100%;
+  display: block;
+}
+
+.chat-settings-select {
+  width: 100%;
+}
+
+.chat-settings-danger {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.chat-settings-danger-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--text-bright);
+  font-size: 12.5px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
+}
+
+.chat-settings-danger-btn:hover {
+  background: var(--bg-hover);
+}
+
+.chat-settings-danger-btn.destructive {
+  color: var(--accent-red);
+}
+
+.chat-settings-danger-btn.destructive:hover {
+  background: var(--accent-red-dim);
+}
