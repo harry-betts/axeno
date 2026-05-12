@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import Sidebar from "./components/Sidebar/Sidebar";
 import ChatView from "./components/ChatView/ChatView";
 import Settings from "./components/Settings/Settings";
@@ -9,14 +10,20 @@ import VerifyIdentity from "./components/VerifyIdentity/VerifyIdentity";
 import { Contact, AppSettings, ServerChoice, defaultSettings } from "./types";
 import { mockContacts, mockMessages } from "./mockData";
 import "./App.css";
+import "./components/Onboarding/Onboarding.css"; 
 
 function computeInitials(name: string): string {
   return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
 }
 
 export default function App() {
-  const [identityCreated, setIdentityCreated] = useState(false);
-  const [displayName, setDisplayName] = useState("");
+  const [appState, setAppState] = useState<"loading" | "onboarding" | "login" | "chat">("loading");
+  const [torStatus, setTorStatus] = useState("Disconnected");
+  const [displayName, setDisplayName] = useState("My User");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [isUnlocking, setIsUnlocking] = useState(false);
+
   const [contacts, setContacts] = useState<Contact[]>(mockContacts);
   const [activeContactId, setActiveContactId] = useState("ax7f2c");
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
@@ -26,17 +33,76 @@ export default function App() {
   const [showChatSettings, setShowChatSettings] = useState(false);
   const [showVerify, setShowVerify]         = useState(false);
 
-  if (!identityCreated) {
-    return <Onboarding onComplete={(name) => { setDisplayName(name); setIdentityCreated(true); }} />;
-  }
+  useEffect(() => {
+    const init = async () => {
+      try {
+        const exists = await invoke<boolean>("has_identity");
+        setAppState(exists ? "login" : "onboarding");
+        
+        const status = await invoke<string>("bootstrap_tor");
+        setTorStatus(status);
+      } catch (err) {
+        setAppState("onboarding");
+      }
+    };
+    init();
+  }, []);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError("");
+    setIsUnlocking(true);
+    try {
+      await invoke<string>("unlock_identity", { passphrase: loginPassword });
+      setAppState("chat");
+    } catch (err) {
+      setLoginError("Incorrect password.");
+    } finally {
+      setIsUnlocking(false);
+    }
+  };
 
   const active = contacts.find(c => c.id === activeContactId)!;
 
   const updateContactServer = (id: string, server: ServerChoice) => {
-    setContacts(prev =>
-      prev.map(c => (c.id === id ? { ...c, serverChoice: server } : c))
-    );
+    setContacts(prev => prev.map(c => (c.id === id ? { ...c, serverChoice: server } : c)));
   };
+
+  if (appState === "loading") {
+    return (
+      <div className="app-root" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div className="onboarding-spinner" style={{ borderColor: 'var(--border)', borderTopColor: 'var(--brand)' }} />
+      </div>
+    );
+  }
+
+  if (appState === "onboarding") {
+    return <Onboarding onComplete={(name) => { setDisplayName(name); setAppState("chat"); }} />;
+  }
+
+  if (appState === "login") {
+    return (
+      <div className="onboarding-root">
+        <div className="onboarding-card">
+          <h1 className="onboarding-title">Welcome Back</h1>
+          <form onSubmit={handleLogin} style={{ width: '100%' }}>
+            <input
+              type="password"
+              className="onboarding-key-input"
+              placeholder="Password"
+              value={loginPassword}
+              onChange={(e) => { setLoginPassword(e.target.value); setLoginError(""); }}
+              autoFocus
+            />
+            {loginError && <div className="onboarding-error">{loginError}</div>}
+            <button type="submit" className="btn btn-primary onboarding-btn" disabled={isUnlocking || !loginPassword}>
+              {isUnlocking ? "Unlocking..." : "Unlock"}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app-root">
@@ -67,9 +133,7 @@ export default function App() {
         />
       )}
 
-      {showAddContact && (
-        <AddContact onClose={() => setShowAddContact(false)} />
-      )}
+      {showAddContact && <AddContact onClose={() => setShowAddContact(false)} />}
 
       {showChatSettings && (
         <ChatSettings
@@ -81,9 +145,11 @@ export default function App() {
         />
       )}
 
-      {showVerify && (
-        <VerifyIdentity contact={active} onClose={() => setShowVerify(false)} />
-      )}
+      {showVerify && <VerifyIdentity contact={active} onClose={() => setShowVerify(false)} />}
+{/*       
+      <div style={{position: 'fixed', bottom: 10, right: 10, fontSize: '10px', color: 'var(--text-dim)'}}>
+        Tor: {torStatus}
+      </div> */}
     </div>
   );
 }

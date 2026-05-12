@@ -4,7 +4,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce, Key
 };
 use libsignal_protocol::{IdentityKey, IdentityKeyPair, PrivateKey};
-use rand::{RngCore, rngs::OsRng}; // Unused trait warnings fixed
+use rand::{Rng, RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -14,6 +14,7 @@ pub struct EncryptedIdentity {
     pub nonce: [u8; 12],
     pub ciphertext: Vec<u8>,
     pub public_key: Vec<u8>,
+    pub registration_id: u16,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -44,34 +45,28 @@ fn derive_key(passphrase: &str, salt: &[u8; 32]) -> Result<DerivedKey, IdentityE
 pub fn create_encrypted_identity(passphrase: &str) -> Result<EncryptedIdentity, IdentityError> {
     let mut rng = OsRng;
 
-    // --- THE BULLETPROOF BYPASS ---
-    // Instead of passing `&mut rng` into libsignal (which requires perfect trait alignment
-    // across the dependency tree), we generate the 32 bytes ourselves.
+    // Generate Signal Registration ID (14-bit integer, 1-16380)
+    let reg_id = (rng.gen::<u16>() % 16380) + 1;
+
+    // Generate random seed and apply Curve25519 clamping manually
     let mut seed = [0u8; 32];
     rng.fill_bytes(&mut seed);
-
-    // Apply standard Signal Curve25519 clamping manually
     seed[0] &= 248;
     seed[31] &= 127;
     seed[31] |= 64;
 
-    // Build the keys directly from the bytes
-    // Build the keys directly from the bytes
     let private_key = PrivateKey::deserialize(&seed)
         .map_err(|e| IdentityError::Signal(e.to_string()))?;
     
-    // Un-wrap the Result returned by public_key()
     let pub_key = private_key.public_key()
         .map_err(|e| IdentityError::Signal(e.to_string()))?;
         
     let identity_key = IdentityKey::new(pub_key);
     let keypair = IdentityKeyPair::new(identity_key, private_key);
-    // ------------------------------
 
     let mut priv_bytes = keypair.private_key().serialize();
     let pub_bytes = keypair.identity_key().serialize();
 
-    // Prepare Encryption
     let mut salt = [0u8; 32];
     rng.fill_bytes(&mut salt);
     let mut nonce_bytes = [0u8; 12];
@@ -86,12 +81,14 @@ pub fn create_encrypted_identity(passphrase: &str) -> Result<EncryptedIdentity, 
         .map_err(|_| IdentityError::Encrypt)?;
 
     priv_bytes.zeroize();
+    seed.zeroize();
 
     Ok(EncryptedIdentity {
         kdf_salt: salt,
         nonce: nonce_bytes,
         ciphertext,
         public_key: pub_bytes.to_vec(),
+        registration_id: reg_id,
     })
 }
 
