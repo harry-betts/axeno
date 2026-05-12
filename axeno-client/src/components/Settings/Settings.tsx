@@ -4,6 +4,7 @@ import {
   IconArrowLeft, IconKey, IconServer, IconShield, IconBell, IconEye,
   IconInfo, IconCopy, IconPlus, IconTrash, IconCheck, IconChevronDown, IconEdit,
 } from "../icons";
+import { invoke } from "@tauri-apps/api/core";
 import "./Settings.css";
 
 type Section = "identity" | "servers" | "privacy" | "notifications" | "appearance" | "about";
@@ -14,9 +15,10 @@ interface Props {
   onClose: () => void;
   displayName: string;
   onChangeName: (name: string) => void;
+  activePassword?: string;
 }
 
-export default function Settings({ settings, onChange, onClose, displayName, onChangeName }: Props) {
+export default function Settings({ settings, onChange, onClose, displayName, onChangeName, activePassword }: Props) {
   const [section, setSection] = useState<Section>("identity");
 
   return (
@@ -40,7 +42,7 @@ export default function Settings({ settings, onChange, onClose, displayName, onC
         </nav>
 
         <main className="settings-content">
-          {section === "identity"      && <IdentitySection displayName={displayName} onChangeName={onChangeName} inviteCodes={settings.inviteCodes} onChangeInviteCodes={(inviteCodes) => onChange({ ...settings, inviteCodes: inviteCodes })} />}
+          {section === "identity"      && <IdentitySection displayName={displayName} onChangeName={onChangeName} activePassword={activePassword} inviteCodes={settings.inviteCodes} onChangeInviteCodes={(inviteCodes) => onChange({ ...settings, inviteCodes: inviteCodes })} />}
           {section === "servers"       && <ServersSection settings={settings} onChange={onChange} />}
           {section === "privacy"       && <PrivacySection settings={settings} onChange={onChange} />}
           {section === "notifications" && <NotificationsSection settings={settings} onChange={onChange} />}
@@ -123,9 +125,10 @@ function computeInitials(name: string): string {
   return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
 }
 
-function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInviteCodes }: {
+function IdentitySection({ displayName, onChangeName, activePassword, inviteCodes, onChangeInviteCodes }: {
   displayName: string;
   onChangeName: (name: string) => void;
+  activePassword?: string;
   inviteCodes: InviteCode[];
   onChangeInviteCodes: (inviteCodes: InviteCode[]) => void;
 }) {
@@ -133,9 +136,18 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
   const [draft, setDraft] = useState(displayName);
   const [copied, setCopied] = useState<string | null>(null);
 
-  const saveName = () => {
+  const saveName = async () => {
     const trimmed = draft.trim();
-    if (trimmed) onChangeName(trimmed);
+    if (trimmed) {
+      onChangeName(trimmed);
+      if (activePassword) {
+        try {
+          await invoke("update_display_name", { passphrase: activePassword, newName: trimmed });
+        } catch (e) {
+          console.error("Failed to save name securely:", e);
+        }
+      }
+    }
     setEditing(false);
   };
 
@@ -431,13 +443,6 @@ function AppearanceSection({ settings, onChange }: { settings: AppSettings; onCh
     </Section>
   );
 }
-
-// function AdvancedSection({ settings, onChange }: { settings: AppSettings; onChange: (s: AppSettings) => void }) {
-//   return (
-//     <Section title="Advanced">
-//     </Section>
-//   );
-// }
 
 function AboutSection() {
   return (

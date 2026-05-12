@@ -7,7 +7,7 @@ import "./Onboarding.css";
 import { invoke } from "@tauri-apps/api/core";
 
 interface Props {
-  onComplete: (displayName: string) => void;
+  onComplete: (displayName: string, passwordUsed: string) => void;
 }
 
 type Step =
@@ -84,7 +84,7 @@ export default function Onboarding({ onComplete }: Props) {
 
   const startNewIdentity = () => {
     setGeneratingFor("new");
-    setStep("set-password"); // Move to password first; keys need password to be encrypted
+    setStep("set-profile"); // Profile FIRST so it can be encrypted into the vault
   };
 
   const submitTransferKey = () => {
@@ -113,16 +113,16 @@ export default function Onboarding({ onComplete }: Props) {
 
     try {
       // 2. Call the Rust Backend
-      // This will take ~1-2 seconds because of Argon2id cost.
-      // The CSS spinner will continue to animate because this is an async call.
+      // Pass both passphrase and displayName so they are stored securely
       const fingerprint = await invoke<string>("create_identity", { 
-        passphrase: password 
+        passphrase: password,
+        displayName: displayName
       });
       
       console.log("Successfully generated identity:", fingerprint);
 
-      // 3. Proceed to final steps
-      setStep(generatingFor === "new" ? "set-profile" : "done");
+      // 3. Proceed to final step
+      setStep("done");
     } catch (err) {
       console.error("Failed to generate identity:", err);
       setPasswordError("Encryption failed. Please try a different password.");
@@ -248,13 +248,26 @@ export default function Onboarding({ onComplete }: Props) {
           </>
         )}
 
-        {/* ── Generating / importing (Visible during invoke) ── */}
-        {step === "generating" && (
-          <div className="onboarding-loading">
-            <div className="onboarding-spinner" />
-            <div className="onboarding-loading-text">{loadingText.main}</div>
-            <div className="onboarding-loading-sub">{loadingText.sub}</div>
-          </div>
+        {/* ── Set profile ── */}
+        {step === "set-profile" && (
+          <>
+            <div className="onboarding-step-icon"><IconUser /></div>
+            <h1 className="onboarding-title">Your display name</h1>
+            <p className="onboarding-text">
+              This is the name other people will see when you contact them.
+            </p>
+            <input
+              type="text"
+              className="onboarding-name-input"
+              placeholder="e.g. Alice"
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+              autoFocus
+            />
+            <button className="btn btn-primary onboarding-btn" onClick={() => setStep("set-password")} disabled={!displayName.trim()}>
+              Continue
+            </button>
+          </>
         )}
 
         {/* ── Set password ── */}
@@ -263,7 +276,7 @@ export default function Onboarding({ onComplete }: Props) {
             <div className="onboarding-step-icon"><IconLock /></div>
             <h1 className="onboarding-title">Protect your keys</h1>
             <p className="onboarding-text">
-              Set a password to encrypt your private keys.
+              Set a password to encrypt your private keys and profile.
             </p>
 
             <div className="onboarding-password-group">
@@ -296,23 +309,13 @@ export default function Onboarding({ onComplete }: Props) {
           </>
         )}
 
-        {/* ── Set profile ── */}
-        {step === "set-profile" && (
-          <>
-            <div className="onboarding-step-icon"><IconUser /></div>
-            <h1 className="onboarding-title">Your display name</h1>
-            <input
-              type="text"
-              className="onboarding-name-input"
-              placeholder="e.g. Alice"
-              value={displayName}
-              onChange={e => setDisplayName(e.target.value)}
-              autoFocus
-            />
-            <button className="btn btn-primary onboarding-btn" onClick={() => setStep("done")} disabled={!displayName.trim()}>
-              Continue
-            </button>
-          </>
+        {/* ── Generating / importing (Visible during invoke) ── */}
+        {step === "generating" && (
+          <div className="onboarding-loading">
+            <div className="onboarding-spinner" />
+            <div className="onboarding-loading-text">{loadingText.main}</div>
+            <div className="onboarding-loading-sub">{loadingText.sub}</div>
+          </div>
         )}
 
         {/* ── Done ── */}
@@ -320,7 +323,7 @@ export default function Onboarding({ onComplete }: Props) {
           <>
             <div className="onboarding-done-icon"><IconCheck /></div>
             <h1 className="onboarding-title">You're ready</h1>
-            <button className="btn btn-primary onboarding-btn" onClick={() => onComplete(displayName)}>
+            <button className="btn btn-primary onboarding-btn" onClick={() => onComplete(displayName, password)}>
               Open Axeno
             </button>
           </>

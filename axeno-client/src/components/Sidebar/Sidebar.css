@@ -210,3 +210,51 @@
   color: var(--text-bright);
   background: var(--bg-hover);
 }
+
+/* --- NEW TOR CSS --- */
+
+.sidebar-tor-status {
+  display: flex;
+  align-items: center;
+  background: var(--bg-input);
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.tor-text {
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.tor-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 6px;
+}
+
+.tor-dot.connecting {
+  background: #eab308;
+  box-shadow: 0 0 8px #eab308;
+  animation: pulse-yellow 1.5s infinite;
+}
+
+.tor-dot.connected {
+  background: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+}
+
+.tor-dot.failed {
+  background: #ef4444;
+  box-shadow: 0 0 8px #ef4444;
+}
+
+@keyframes pulse-yellow {
+  0% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
+  100% { opacity: 1; transform: scale(1); }
+}

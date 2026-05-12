@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar/Sidebar";
 import ChatView from "./components/ChatView/ChatView";
 import Settings from "./components/Settings/Settings";
@@ -12,14 +13,22 @@ import { mockContacts, mockMessages } from "./mockData";
 import "./App.css";
 import "./components/Onboarding/Onboarding.css"; 
 
+interface UnlockResponse {
+  fingerprint: string;
+  display_name: string;
+}
+
 function computeInitials(name: string): string {
   return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
 }
 
 export default function App() {
   const [appState, setAppState] = useState<"loading" | "onboarding" | "login" | "chat">("loading");
-  const [torStatus, setTorStatus] = useState("Disconnected");
+  const [torStatus, setTorStatus] = useState<"connecting" | "connected" | "failed">("connecting");
+  
   const [displayName, setDisplayName] = useState("My User");
+  const [activePassword, setActivePassword] = useState("");
+  
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [isUnlocking, setIsUnlocking] = useState(false);
@@ -34,18 +43,25 @@ export default function App() {
   const [showVerify, setShowVerify]         = useState(false);
 
   useEffect(() => {
+    // Listen for Tor background events emitted from Rust
+    const unlisten = listen<"connecting" | "connected" | "failed">("tor-status", (event) => {
+      setTorStatus(event.payload);
+    });
+
     const init = async () => {
       try {
         const exists = await invoke<boolean>("has_identity");
         setAppState(exists ? "login" : "onboarding");
         
-        const status = await invoke<string>("bootstrap_tor");
-        setTorStatus(status);
+        // Spawn Tor bootstrap in background
+        await invoke("bootstrap_tor");
       } catch (err) {
         setAppState("onboarding");
       }
     };
     init();
+
+    return () => { unlisten.then(f => f()); };
   }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -53,7 +69,9 @@ export default function App() {
     setLoginError("");
     setIsUnlocking(true);
     try {
-      await invoke<string>("unlock_identity", { passphrase: loginPassword });
+      const res = await invoke<UnlockResponse>("unlock_identity", { passphrase: loginPassword });
+      setDisplayName(res.display_name);
+      setActivePassword(loginPassword); // Cache session password so we can re-encrypt settings changes later
       setAppState("chat");
     } catch (err) {
       setLoginError("Incorrect password.");
@@ -77,7 +95,11 @@ export default function App() {
   }
 
   if (appState === "onboarding") {
-    return <Onboarding onComplete={(name) => { setDisplayName(name); setAppState("chat"); }} />;
+    return <Onboarding onComplete={(name, password) => { 
+      setDisplayName(name); 
+      setActivePassword(password);
+      setAppState("chat"); 
+    }} />;
   }
 
   if (appState === "login") {
@@ -115,6 +137,7 @@ export default function App() {
         onOpenSettings={() => setShowSettings(true)}
         myInitials={computeInitials(displayName)}
         myDisplayName={displayName}
+        torStatus={torStatus}
       />
 
       <ChatView
@@ -130,6 +153,7 @@ export default function App() {
           displayName={displayName}
           onChangeName={setDisplayName}
           onClose={() => setShowSettings(false)}
+          activePassword={activePassword}
         />
       )}
 
@@ -146,10 +170,6 @@ export default function App() {
       )}
 
       {showVerify && <VerifyIdentity contact={active} onClose={() => setShowVerify(false)} />}
-{/*       
-      <div style={{position: 'fixed', bottom: 10, right: 10, fontSize: '10px', color: 'var(--text-dim)'}}>
-        Tor: {torStatus}
-      </div> */}
     </div>
   );
 }

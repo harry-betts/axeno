@@ -12,17 +12,24 @@ interface Props {
   onOpenSettings: () => void;
   myInitials: string;
   myDisplayName: string;
+  torStatus: "connecting" | "connected" | "failed"; // NEW
 }
 
 export default function Sidebar({
   contacts, allMessages, activeContactId, onSelectContact,
   onOpenAddContact, onOpenSettings,
-  myInitials, myDisplayName,
+  myInitials, myDisplayName, torStatus
 }: Props) {
   return (
     <aside className="sidebar">
-      <div className="sidebar-header">
+      <div className="sidebar-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div className="brand">Axeno</div>
+        
+        {/* NEW TOR INDICATOR */}
+        <div className="sidebar-tor-status" title={`Tor: ${torStatus}`}>
+          <span className={`tor-dot ${torStatus}`} />
+          <span className="tor-text">Tor</span>
+        </div>
       </div>
 
       <div className="sidebar-search">
