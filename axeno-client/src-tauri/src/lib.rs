@@ -103,6 +103,14 @@ fn save_vault(app: &AppHandle, blob: &EncryptedIdentity) -> Result<(), String> {
     }
 
     fs::rename(&tmp, &path).map_err(|e| format!("atomic rename failed: {e}"))?;
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+    }
     Ok(())
 }
 
@@ -433,6 +441,15 @@ async fn messaging_mark_contact_verified(
 }
 
 #[tauri::command]
+async fn messaging_mark_contact_read(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    contact_id: String,
+) -> Result<messaging::StoredContact, String> {
+    messaging::mark_contact_read(app, &session, contact_id).await
+}
+
+#[tauri::command]
 async fn messaging_update_contact_server(
     app: AppHandle,
     session: State<'_, AppSessionState>,
@@ -496,6 +513,7 @@ pub fn run() {
             messaging_send_text_message,
             messaging_handle_incoming_envelope,
             messaging_mark_contact_verified,
+            messaging_mark_contact_read,
             messaging_update_contact_server,
             transport_connect_server,
             transport_disconnect_server,

@@ -15,7 +15,7 @@ use tokio_tungstenite::{connect_async, client_async, tungstenite::{client::IntoC
 use tor_rtcompat::PreferredRuntime;
 use uuid::Uuid;
 
-const EXPECTED_PROTOCOL_VERSION: u16 = 3;
+const EXPECTED_PROTOCOL_VERSION: u16 = 4;
 
 #[derive(Default)]
 pub struct TransportState {
@@ -46,7 +46,7 @@ pub struct StoredEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientFrame {
     Hello { recipient_id: String, auth_token: String, delivery_token: String },
-    IssueSenderCertificate { request_id: String, sender_uuid: String, sender_device_id: u32, identity_public_b64: String },
+    IssueSenderCertificate { request_id: String, sender_uuid: String, sender_device_id: u32, sender_cert_public_b64: String },
     SendEnvelope {
         to: String,
         delivery_token: String,
@@ -161,7 +161,7 @@ pub async fn send_envelope(
     validate_recipient_id(&to)?;
     validate_token(&delivery_token, "delivery token")?;
     if envelope_type.len() > 32 { return Err("envelope_type is too long".into()); }
-    if ciphertext.len() > 64 * 1024 { return Err("ciphertext exceeds 64 KiB frame limit".into()); }
+    if ciphertext.len() > 512 * 1024 { return Err("ciphertext exceeds 512 KiB frame limit".into()); }
 
     let guard = state.connections.lock().await;
     let conn = guard.get(&server_id).ok_or_else(|| "server is not connected".to_string())?;
@@ -174,11 +174,11 @@ pub async fn request_sender_certificate(
     server_id: String,
     sender_uuid: String,
     sender_device_id: u32,
-    identity_public_b64: String,
+    sender_cert_public_b64: String,
 ) -> Result<SenderCertificateResponse, String> {
     validate_recipient_id(&sender_uuid)?;
     if sender_device_id == 0 || sender_device_id > 127 { return Err("invalid sender device id".into()); }
-    if identity_public_b64.len() > 256 { return Err("identity public key is too large".into()); }
+    if sender_cert_public_b64.len() > 256 { return Err("sender certificate public key is too large".into()); }
     let request_id = Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
     state.pending_sender_certs.lock().await.insert(request_id.clone(), tx);
@@ -186,7 +186,7 @@ pub async fn request_sender_certificate(
     let send_result = {
         let guard = state.connections.lock().await;
         let conn = guard.get(&server_id).ok_or_else(|| "server is not connected".to_string())?;
-        conn.outbound.send(ClientFrame::IssueSenderCertificate { request_id: request_id.clone(), sender_uuid, sender_device_id, identity_public_b64 })
+        conn.outbound.send(ClientFrame::IssueSenderCertificate { request_id: request_id.clone(), sender_uuid, sender_device_id, sender_cert_public_b64 })
             .map_err(|_| "server connection is closed".to_string())
     };
 

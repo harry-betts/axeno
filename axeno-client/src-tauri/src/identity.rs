@@ -13,7 +13,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use libsignal_protocol::{IdentityKey, IdentityKeyPair, KeyPair, PublicKey};
+use libsignal_protocol::{IdentityKey, IdentityKeyPair, KeyPair, PrivateKey, PublicKey};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -168,6 +168,23 @@ fn decrypt_vault(
         .map_err(|_| IdentityError::Decrypt)
 }
 
+fn verify_unlocked_consistency(blob: &EncryptedIdentity, secrets: &VaultSecrets) -> Result<(), IdentityError> {
+    // Public shell data is outside the AEAD ciphertext for backwards compatibility,
+    // so validate that it still matches the decrypted private material on unlock.
+    PublicKey::deserialize(&blob.public_key).map_err(|e| IdentityError::Signal(e.to_string()))?;
+    PrivateKey::deserialize(&secrets.identity_priv).map_err(|e| IdentityError::Signal(e.to_string()))?;
+    KeyPair::from_public_and_private(&blob.signed_prekey_public, &secrets.spk_priv)
+        .map_err(|e| IdentityError::Signal(e.to_string()))?;
+
+    for public in &blob.opks_public {
+        let secret = secrets.opks_secret.iter().find(|s| s.id == public.id)
+            .ok_or_else(|| IdentityError::Signal(format!("missing private one-time prekey {}", public.id)))?;
+        KeyPair::from_public_and_private(&public.public_key, &secret.private_key)
+            .map_err(|e| IdentityError::Signal(e.to_string()))?;
+    }
+    Ok(())
+}
+
 // --- Public API -----------------------------------------------------------
 
 /// The full output of creating a new identity: the on-disk blob plus the
@@ -285,6 +302,7 @@ pub fn unlock_identity(
     let secrets: VaultSecrets = serde_json::from_slice(&plaintext)
         .map_err(|e| IdentityError::Serde(e.to_string()))?;
     plaintext.zeroize();
+    verify_unlocked_consistency(blob, &secrets)?;
     Ok(UnlockedIdentity { secrets, key })
 }
 
@@ -334,6 +352,8 @@ pub fn fingerprint(blob: &EncryptedIdentity) -> String {
 /// Useful as a smoke test after loading from disk.
 pub fn verify_blob_structure(blob: &EncryptedIdentity) -> Result<(), IdentityError> {
     IdentityKey::decode(&blob.public_key).map_err(|e| IdentityError::Signal(e.to_string()))?;
+    PublicKey::deserialize(&blob.signed_prekey_public)
+        .map_err(|e| IdentityError::Signal(e.to_string()))?;
     for opk in &blob.opks_public {
         PublicKey::deserialize(&opk.public_key)
             .map_err(|e| IdentityError::Signal(e.to_string()))?;

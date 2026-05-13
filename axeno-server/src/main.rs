@@ -3,7 +3,7 @@
 //! Relay duties:
 //! - authenticate mailbox collection;
 //! - delivery-token gate sending;
-//! - issue short-lived libsignal SenderCertificate objects;
+//! - issue short-lived libsignal SenderCertificate objects for per-route pseudonymous certificate keys;
 //! - store/forward sealed-sender ciphertext only.
 //!
 //! The relay never receives plaintext. It can still observe transport metadata:
@@ -40,10 +40,11 @@ const MAX_QUEUE_PER_RECIPIENT: usize = 200;
 // so tungstenite/axum does not close the WebSocket during send.
 const MAX_FRAME_BYTES: usize = 512 * 1024;
 const MAX_TOTAL_QUEUED_BYTES: usize = 64 * 1024 * 1024;
-const PROTOCOL_VERSION: u16 = 3;
+const PROTOCOL_VERSION: u16 = 4;
 const SENDER_CERT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 const RATE_WINDOW_MS: u64 = 60 * 1000;
 const MAX_FRAMES_PER_WINDOW: u32 = 600;
+const MAX_MAILBOXES: usize = 50_000;
 
 type RecipientId = String;
 type ClientTx = mpsc::UnboundedSender<ServerFrame>;
@@ -96,7 +97,7 @@ struct StoredEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientFrame {
     Hello { recipient_id: RecipientId, auth_token: String, delivery_token: String },
-    IssueSenderCertificate { request_id: String, sender_uuid: String, sender_device_id: u32, identity_public_b64: String },
+    IssueSenderCertificate { request_id: String, sender_uuid: String, sender_device_id: u32, sender_cert_public_b64: String },
     SendEnvelope { to: RecipientId, delivery_token: String, envelope_type: String, ciphertext: String },
     Poll,
     Ack { ids: Vec<Uuid> },
@@ -192,10 +193,46 @@ fn load_disk_state(data_dir: &PathBuf) -> anyhow::Result<DiskState> {
 
 fn save_disk_state(data_dir: &PathBuf, state: &DiskState) -> anyhow::Result<()> {
     let path = disk_state_path(data_dir);
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("relay-state.json"),
+        Uuid::new_v4()
+    ));
     let raw = serde_json::to_vec_pretty(state)?;
-    fs::write(&tmp, raw)?;
-    fs::rename(tmp, path)?;
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(&raw)?;
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(&raw)?;
+        file.sync_all()?;
+    }
+
+    if let Err(e) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    #[cfg(unix)]
+    {
+        if let Ok(dir) = fs::File::open(data_dir) {
+            let _ = dir.sync_all();
+        }
+    }
     Ok(())
 }
 
@@ -276,6 +313,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         continue;
                     }
                 } else {
+                    if state.mailbox_auth.len() >= MAX_MAILBOXES {
+                        let _ = tx.send(err("relay_full", "relay mailbox limit reached"));
+                        continue;
+                    }
                     state.mailbox_auth.insert(rid.clone(), MailboxAuth { receive_auth_hash: auth_hash, delivery_token_hash: delivery_hash });
                     persist_mailbox_auth(&state);
                 }
@@ -284,7 +325,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 let _ = tx.send(ServerFrame::HelloOk { protocol_version: PROTOCOL_VERSION, server_time_ms: now_ms(), trust_root_b64: state.crypto.trust_root_public_b64.clone() });
                 flush_queue(&state, &rid, &tx);
             }
-            ClientFrame::IssueSenderCertificate { request_id, sender_uuid, sender_device_id, identity_public_b64 } => {
+            ClientFrame::IssueSenderCertificate { request_id, sender_uuid, sender_device_id, sender_cert_public_b64 } => {
                 let Some(registered_rid) = recipient_id.as_ref() else {
                     let _ = tx.send(err("not_registered", "send hello first"));
                     continue;
@@ -293,7 +334,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     let _ = tx.send(err("cert_denied", "sender certificate can only be issued for your authenticated mailbox"));
                     continue;
                 }
-                match issue_sender_certificate(&state, request_id, sender_uuid, sender_device_id, identity_public_b64) {
+                match issue_sender_certificate(&state, request_id, sender_uuid, sender_device_id, sender_cert_public_b64) {
                     Ok(frame) => { let _ = tx.send(frame); }
                     Err(e) => { let _ = tx.send(err("cert_failed", &e)); }
                 }
@@ -322,7 +363,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
 
                 let env = StoredEnvelope { id: Uuid::new_v4(), to: to.clone(), envelope_type, ciphertext };
-                let _delivered_live = state.online.get(&to).and_then(|live| live.send(ServerFrame::Envelope { envelope: env.clone() }).ok()).is_some();
+                let delivered_live = state.online.get(&to).and_then(|live| live.send(ServerFrame::Envelope { envelope: env.clone() }).ok()).is_some();
 
                 let mut queue = state.queues.entry(to).or_default();
                 while queue.len() >= MAX_QUEUE_PER_RECIPIENT {
@@ -330,7 +371,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
                 state.total_queued_bytes.fetch_add(env.ciphertext.len(), Ordering::Relaxed);
                 queue.push_back(env.clone());
-                let _ = tx.send(ServerFrame::SendOk { id: env.id, queued: false });
+                let _ = tx.send(ServerFrame::SendOk { id: env.id, queued: !delivered_live });
             }
             ClientFrame::Poll => {
                 if let Some(rid) = recipient_id.as_ref() { flush_queue(&state, rid, &tx); }
@@ -359,12 +400,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     debug!("websocket disconnected");
 }
 
-fn issue_sender_certificate(state: &AppState, request_id: String, sender_uuid: String, sender_device_id: u32, identity_public_b64: String) -> Result<ServerFrame, String> {
+fn issue_sender_certificate(state: &AppState, request_id: String, sender_uuid: String, sender_device_id: u32, sender_cert_public_b64: String) -> Result<ServerFrame, String> {
     if !valid_recipient_id(&sender_uuid) || sender_device_id == 0 || sender_device_id > 127 {
         return Err("invalid sender certificate request".into());
     }
-    let identity_bytes = STANDARD_NO_PAD.decode(identity_public_b64.as_bytes()).map_err(|_| "bad identity public key encoding".to_string())?;
-    let sender_public = PublicKey::deserialize(&identity_bytes).map_err(|e| format!("bad identity public key: {e}"))?;
+    // Privacy boundary: this is a random per-route sealed-sender certificate key,
+    // not the client's long-term Signal identity key. The relay can verify that
+    // the caller controls this mailbox, but it must not learn a stable Axeno identity.
+    let cert_key_bytes = STANDARD_NO_PAD.decode(sender_cert_public_b64.as_bytes()).map_err(|_| "bad sender certificate public key encoding".to_string())?;
+    let sender_public = PublicKey::deserialize(&cert_key_bytes).map_err(|e| format!("bad sender certificate public key: {e}"))?;
     let mut rng = fresh_rng().map_err(|e| e.to_string())?;
     let expires_at_ms = now_ms().saturating_add(SENDER_CERT_TTL_MS);
     let sender_device = sender_device_id.try_into().map_err(|_| "bad device id".to_string())?;

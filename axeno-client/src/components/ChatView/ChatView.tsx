@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Contact, Message } from "../../types";
 import { contactDisplayName, contactInitials, formatMessageTime } from "../../utils";
-import { IconDots, IconPaperclip, IconArrowUp } from "../icons";
+import { IconDots, IconArrowUp } from "../icons";
 import "./ChatView.css";
 
 interface Props {
@@ -9,9 +9,11 @@ interface Props {
   messages: Message[];
   onOpenChatSettings: () => void;
   onSendMessage: (text: string) => Promise<void>;
+  sendOnEnter: boolean;
+  messageTextSize: "small" | "medium" | "large";
 }
 
-export default function ChatView({ contact, messages, onOpenChatSettings, onSendMessage }: Props) {
+export default function ChatView({ contact, messages, onOpenChatSettings, onSendMessage, sendOnEnter, messageTextSize }: Props) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
@@ -59,7 +61,7 @@ export default function ChatView({ contact, messages, onOpenChatSettings, onSend
               className={`message-row ${msg.mine ? "mine" : "theirs"}`}
               style={{ marginTop: isSequenceStart && prev ? 10 : 0 }}
             >
-              <div className={`bubble ${msg.mine ? "bubble-mine" : "bubble-theirs"}`}>
+              <div className={`bubble ${msg.mine ? "bubble-mine" : "bubble-theirs"} text-${messageTextSize}`}>
                 {msg.text}
               </div>
               <div className="message-time">{formatMessageTime(msg.timestamp)}</div>
@@ -70,14 +72,11 @@ export default function ChatView({ contact, messages, onOpenChatSettings, onSend
 
       <div className="chat-input-wrap">
         <div className="chat-input-row">
-          <button className="chat-input-attach" aria-label="Attach file">
-            <IconPaperclip />
-          </button>
           <input
             type="text"
             value={input}
             onChange={e => setInput(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            onKeyDown={e => { if (e.key === "Enter" && (sendOnEnter ? !e.shiftKey : e.ctrlKey)) { e.preventDefault(); send(); } }}
             placeholder="Message"
             className="chat-input"
           />

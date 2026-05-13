@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   IconCheck, IconKey, IconShield,
-  IconLock, IconEye, IconEyeOff, IconSmartphone, IconUser,
+  IconLock, IconEye, IconEyeOff, IconUser,
 } from "../icons";
 import "./Onboarding.css";
 import { invoke } from "@tauri-apps/api/core";
@@ -150,8 +150,8 @@ export default function Onboarding({ onComplete }: Props) {
               <div className="onboarding-point">
                 <span className="onboarding-point-icon"><IconShield /></span>
                 <div>
-                  <div className="onboarding-point-title">Tor by default</div>
-                  <div className="onboarding-point-desc">All traffic routes through the Tor network.</div>
+                  <div className="onboarding-point-title">Tor/onion relay support</div>
+                  <div className="onboarding-point-desc">Localhost is for development; .onion relays are routed through Tor.</div>
                 </div>
               </div>
               <div className="onboarding-point">
@@ -182,15 +182,6 @@ export default function Onboarding({ onComplete }: Props) {
                 <div className="onboarding-choice-body">
                   <div className="onboarding-choice-title">Create new identity</div>
                   <div className="onboarding-choice-desc">Generate a fresh keypair on your device.</div>
-                </div>
-                <span className="onboarding-choice-arrow">›</span>
-              </button>
-
-              <button className="onboarding-choice" onClick={() => setStep("transfer-show")}>
-                <span className="onboarding-choice-icon"><IconSmartphone /></span>
-                <div className="onboarding-choice-body">
-                  <div className="onboarding-choice-title">Transfer from device</div>
-                  <div className="onboarding-choice-desc">Not implemented yet in this build.</div>
                 </div>
                 <span className="onboarding-choice-arrow">›</span>
               </button>

@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import { Contact, Message } from "../../types";
 import { contactDisplayName, contactInitials, formatMessageTime, lastMessage, unreadCount } from "../../utils";
 import { IconSearch, IconPlus, IconSettings } from "../icons";
@@ -20,6 +21,17 @@ export default function Sidebar({
   onOpenAddContact, onOpenSettings,
   myInitials, myDisplayName, torStatus
 }: Props) {
+  const [query, setQuery] = useState("");
+  const visibleContacts = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return contacts;
+    return contacts.filter(c => {
+      const msgs = allMessages[c.id] ?? [];
+      const last = lastMessage(msgs)?.text ?? "";
+      return [contactDisplayName(c), c.recipientId ?? "", last].some(v => v.toLowerCase().includes(q));
+    });
+  }, [contacts, allMessages, query]);
+
   return (
     <aside className="sidebar">
       <div className="sidebar-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -34,11 +46,11 @@ export default function Sidebar({
 
       <div className="sidebar-search">
         <span className="sidebar-search-icon"><IconSearch /></span>
-        <input type="text" placeholder="Search" className="sidebar-search-input" />
+        <input type="text" placeholder="Search" className="sidebar-search-input" value={query} onChange={e => setQuery(e.target.value)} />
       </div>
 
       <div className="sidebar-list">
-        {contacts.map((c) => {
+        {visibleContacts.map((c) => {
           const isActive = c.id === activeContactId;
           const msgs = allMessages[c.id] ?? [];
           const last = lastMessage(msgs);

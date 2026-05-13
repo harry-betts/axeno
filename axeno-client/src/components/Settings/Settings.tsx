@@ -255,8 +255,8 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
           {/* This header will now be styled as a bold sub-section */}
           <div className="inviteCodes-block-title">Connection Codes</div>
           <div className="inviteCodes-block-desc">
-            Share a single-use-ish code with someone so they can start a conversation with you.
-            Each code gets its own routing mailbox and expires after 24 hours; deleting it disables your local receive route.
+            Share a code with someone so they can start a conversation with you.
+            Each code gets its own routing mailbox and expires after 24 hours; deleting it disables your local receive route. Codes are stored only in the encrypted backend store, not browser storage.
           </div>
         </div>
 
@@ -297,15 +297,6 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
         description="Set a new password for encrypting your vault. Your private keys are re-encrypted with the new password."
         control={<button className="btn btn-secondary" onClick={() => setShowPwModal(true)}>Change…</button>}
       />
-
-      <div className="danger-zone">
-        <div className="danger-zone-label">Danger zone</div>
-        <Row
-          label="Regenerate identity"
-          description="Creates a new keypair and deletes the old one. All existing data will be lost (contacts, messages, etc)."
-          control={<button className="btn btn-danger">Start over</button>}
-        />
-      </div>
 
       {showPwModal && (
         <div className="settings-modal-backdrop" onClick={() => !pwBusy && setShowPwModal(false)}>
@@ -470,7 +461,7 @@ function AppearanceSection({ settings, onChange }: { settings: AppSettings; onCh
       />
       <Row
         label="Send with Enter"
-        description="When off, Enter inserts a new line and you send with Ctrl+Enter."
+        description="When off, only Ctrl+Enter sends."
         control={<Toggle on={settings.sendOnEnter} onChange={(v) => onChange({ ...settings, sendOnEnter: v })} />}
       />
     </Section>
@@ -488,7 +479,7 @@ function AboutSection({ torStatus, torError }: { torStatus: "connecting" | "conn
     <Section title="About">
       <div className="about-block">
         <div className="about-row"><span>Version</span><span className="mono">0.1.0-dev</span></div>
-        <div className="about-row"><span>Protocol</span><span>1:1 text uses libsignal-protocol sessions and official libsignal Sealed Sender envelopes.</span></div>
+        <div className="about-row"><span>Protocol</span><span>1:1 text uses libsignal-protocol sessions and libsignal Sealed Sender envelopes. Sender certificates are route-scoped so the relay does not receive your long-term Signal identity key.</span></div>
         <div className="about-row"><span>Relay metadata</span><span>The relay sees destination mailboxes, delivery-token proof, ciphertext size/timing, and the authenticated receive mailbox for the socket used to submit a send. Axeno now uses per-contact return mailboxes to reduce cross-contact linking, but it is not mixnet-level anonymous.</span></div>
         <div className="about-row"><span>Transport</span><span>Local WebSocket for development; .onion WebSocket through Tor for real relay use.</span></div>
         <div className="about-row"><span>Tor status</span><span>{torLabel}</span></div>

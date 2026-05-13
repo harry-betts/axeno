@@ -1,35 +1,17 @@
-import { Contact, AppSettings, ServerChoice } from "../../types";
+import { Contact } from "../../types";
 import { contactDisplayName, contactInitials } from "../../utils";
 import {
-  IconX, IconShield, IconChevronRight, IconChevronDown,
+  IconX, IconShield, IconChevronRight,
 } from "../icons";
 import "./ChatSettings.css";
 
 interface Props {
   contact: Contact;
-  settings: AppSettings;
   onClose: () => void;
   onOpenVerify: () => void;
-  onUpdateContactServer: (id: string, server: ServerChoice) => void | Promise<void>;
 }
 
-export default function ChatSettings({ contact, settings, onClose, onOpenVerify, onUpdateContactServer }: Props) {
-  const currentChoice: ServerChoice = contact.serverChoice ?? settings.defaultServer;
-
-  const onChangeServer = (val: string) => {
-    if (val === "official") {
-      onUpdateContactServer(contact.id, { kind: "official" });
-    } else if (val.startsWith("private:")) {
-      const serverId = val.slice("private:".length);
-      onUpdateContactServer(contact.id, { kind: "private", serverId });
-    }
-  };
-
-  const selectValue =
-    currentChoice.kind === "official"
-      ? "official"
-      : `private:${currentChoice.serverId}`;
-
+export default function ChatSettings({ contact, onClose, onOpenVerify }: Props) {
   return (
     <>
       <div className="chat-settings-backdrop" onClick={onClose} />
@@ -59,20 +41,7 @@ export default function ChatSettings({ contact, settings, onClose, onOpenVerify,
           <section className="chat-settings-section">
             <div className="chat-settings-section-title">Server</div>
             <div className="chat-settings-section-desc">
-              Where your messages to this contact are deposited. Defaults to your global setting.
-            </div>
-            <div className="select-wrap chat-settings-select-wrap">
-              <select
-                className="select chat-settings-select"
-                value={selectValue}
-                onChange={(e) => onChangeServer(e.target.value)}
-              >
-                <option value="official">Local dev relay</option>
-                {settings.privateServers.map(s => (
-                  <option key={s.id} value={`private:${s.id}`}>{s.name}</option>
-                ))}
-              </select>
-              <span className="select-chevron"><IconChevronDown /></span>
+              This contact's relay and mailbox come from their connection code. Changing it safely requires a fresh code from that contact.
             </div>
           </section>
         </div>

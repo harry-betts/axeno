@@ -9,7 +9,7 @@ import AddContact from "./components/AddContact/AddContact";
 import Onboarding from "./components/Onboarding/Onboarding";
 import VerifyIdentity from "./components/VerifyIdentity/VerifyIdentity";
 import {
-  Contact, Message, AppSettings, ServerChoice, defaultSettings,
+  Contact, Message, AppSettings, defaultSettings,
   MessagingSnapshot, BackendMessage, BackendContact, contactFromBackend, messageFromBackend,
 } from "./types";
 import "./App.css";
@@ -21,6 +21,21 @@ interface TorStatusEvent { status: TorStatus; reason?: string; }
 interface IncomingEnvelopeEvent { server_id: string; envelope: { id: string; to: string; envelope_type: string; ciphertext: string; }; }
 interface IncomingMessageEvent { contact_id: string; message: BackendMessage; }
 interface SendMessageResponse { message: BackendMessage; }
+
+function sanitizeSettingsForStorage(settings: AppSettings): AppSettings {
+  return {
+    ...settings,
+    // Connection codes contain delivery tokens and mailbox routing metadata.
+    // They live only in the encrypted Rust-side message store, never localStorage.
+    inviteCodes: [],
+  };
+}
+
+function parseStoredSettings(raw: string | null): AppSettings {
+  if (!raw) return defaultSettings;
+  const parsed = JSON.parse(raw) as Partial<AppSettings>;
+  return { ...defaultSettings, ...parsed, inviteCodes: [] };
+}
 
 function computeInitials(name: string): string {
   return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
@@ -50,8 +65,7 @@ export default function App() {
   const [activeContactId, setActiveContactId] = useState("");
   const [settings, setSettings] = useState<AppSettings>(() => {
     try {
-      const raw = localStorage.getItem("axeno.settings.v1");
-      return raw ? { ...defaultSettings, ...JSON.parse(raw) } : defaultSettings;
+      return parseStoredSettings(localStorage.getItem("axeno.settings.v1"));
     } catch {
       return defaultSettings;
     }
@@ -63,7 +77,7 @@ export default function App() {
   const [showVerify, setShowVerify] = useState(false);
 
   useEffect(() => {
-    try { localStorage.setItem("axeno.settings.v1", JSON.stringify(settings)); } catch {}
+    try { localStorage.setItem("axeno.settings.v1", JSON.stringify(sanitizeSettingsForStorage(settings))); } catch {}
   }, [settings]);
 
   const loadMessaging = useCallback(async () => {
@@ -87,10 +101,6 @@ export default function App() {
         await invoke("messaging_handle_incoming_envelope", {
           serverId: event.payload.server_id,
           envelope: event.payload.envelope,
-        });
-        await invoke("transport_ack_envelopes", {
-          serverId: event.payload.server_id,
-          ids: [event.payload.envelope.id],
         });
       } catch {
         // Leave it queued if decryption failed; this avoids deleting data we cannot read.
@@ -163,22 +173,14 @@ export default function App() {
     setMessages(prev => ({ ...prev, [contactId]: [...(prev[contactId] ?? []), msg] }));
   };
 
+  const selectContact = async (id: string) => {
+    setActiveContactId(id);
+    setContacts(prev => prev.map(c => c.id === id ? { ...c, lastReadAt: Date.now() } : c));
+    await invoke("messaging_mark_contact_read", { contactId: id }).catch(() => {});
+  };
+
   const active = contacts.find(c => c.id === activeContactId) || contacts[0];
 
-  const updateContactServer = async (id: string, server: ServerChoice) => {
-    const serverUrl = server.kind === "official"
-      ? "ws://127.0.0.1:8787/ws"
-      : settings.privateServers.find(s => s.id === server.serverId)?.onion;
-    if (!serverUrl) return;
-    try {
-      const updated = await invoke<BackendContact>("messaging_update_contact_server", { contactId: id, serverUrl });
-      const mapped = { ...contactFromBackend(updated), serverChoice: server };
-      setContacts(prev => prev.map(c => (c.id === id ? mapped : c)));
-      await invoke("messaging_connect_all").catch(() => {});
-    } catch {
-      setContacts(prev => prev.map(c => (c.id === id ? { ...c, serverChoice: server } : c)));
-    }
-  };
 
   if (appState === "loading") {
     return <div className="app-root" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}><div className="onboarding-spinner" style={{ borderColor: "var(--border)", borderTopColor: "var(--brand)" }} /></div>;
@@ -203,17 +205,17 @@ export default function App() {
 
   return (
     <div className="app-root">
-      <Sidebar contacts={contacts} allMessages={messages} activeContactId={active?.id ?? ""} onSelectContact={setActiveContactId} onOpenAddContact={() => setShowAddContact(true)} onOpenSettings={() => setShowSettings(true)} myInitials={computeInitials(displayName)} myDisplayName={displayName || "Me"} torStatus={torStatus} />
+      <Sidebar contacts={contacts} allMessages={messages} activeContactId={active?.id ?? ""} onSelectContact={selectContact} onOpenAddContact={() => setShowAddContact(true)} onOpenSettings={() => setShowSettings(true)} myInitials={computeInitials(displayName)} myDisplayName={displayName || "Me"} torStatus={torStatus} />
 
       {active ? (
-        <ChatView contact={active} messages={messages[active.id] || []} onOpenChatSettings={() => setShowChatSettings(true)} onSendMessage={(text) => sendMessage(active.id, text)} />
+        <ChatView contact={active} messages={messages[active.id] || []} onOpenChatSettings={() => setShowChatSettings(true)} onSendMessage={(text) => sendMessage(active.id, text)} sendOnEnter={settings.sendOnEnter} messageTextSize={settings.messageTextSize} />
       ) : (
         <main className="chat-view" style={{ display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)" }}>Generate a connection code or add a contact to start messaging.</main>
       )}
 
       {showSettings && <Settings settings={settings} onChange={setSettings} displayName={displayName} onChangeName={setDisplayName} onClose={() => setShowSettings(false)} torStatus={torStatus} torError={torError} />}
       {showAddContact && <AddContact onClose={() => setShowAddContact(false)} onAdded={handleAddedContact} />}
-      {showChatSettings && active && <ChatSettings contact={active} settings={settings} onClose={() => setShowChatSettings(false)} onOpenVerify={() => { setShowChatSettings(false); setShowVerify(true); }} onUpdateContactServer={updateContactServer} />}
+      {showChatSettings && active && <ChatSettings contact={active} onClose={() => setShowChatSettings(false)} onOpenVerify={() => { setShowChatSettings(false); setShowVerify(true); }} />}
       {showVerify && active && <VerifyIdentity contact={active} onClose={() => setShowVerify(false)} />}
     </div>
   );
