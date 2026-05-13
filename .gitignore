@@ -3,7 +3,6 @@ dist/
 
 # Rust
 target/
-Cargo.lock
 
 # Tauri
 axeno-client/src-tauri/target/
