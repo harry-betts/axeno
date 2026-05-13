@@ -26,8 +26,8 @@ zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
 thiserror = "1"
 
-arti-client = { version = "0.26", features = ["tokio", "static"] }
-tor-rtcompat = { version = "0.26", features = ["tokio"] }
+arti-client = { version = "0.41", features = ["tokio", "static"] }
+tor-rtcompat = { version = "0.41", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
