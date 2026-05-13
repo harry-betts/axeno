@@ -3,11 +3,14 @@ import { Contact, Message } from "./types";
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+export function contactDisplayName(contact: Contact): string {
+  const name = contact.displayName?.trim();
+  return name || "Unknown contact";
+}
+
 export function contactInitials(contact: Contact): string {
-  if (contact.alias) {
-    return contact.alias.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase();
-  }
-  return contact.id.slice(0, 2).toUpperCase();
+  const name = contactDisplayName(contact);
+  return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
 }
 
 export function formatMessageTime(timestamp: number): string {

@@ -14,8 +14,8 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
 };
 use libsignal_protocol::{IdentityKey, IdentityKeyPair, KeyPair, PrivateKey};
-use rand::rngs::StdRng;
-use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
+use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -120,10 +120,10 @@ fn fill_random(buf: &mut [u8]) -> Result<(), IdentityError> {
     getrandom::getrandom(buf).map_err(|e| IdentityError::Random(e.to_string()))
 }
 
-fn fresh_rng() -> Result<StdRng, IdentityError> {
+fn fresh_rng() -> Result<ChaCha20Rng, IdentityError> {
     let mut seed = [0u8; 32];
     fill_random(&mut seed)?;
-    Ok(StdRng::from_seed(seed))
+    Ok(ChaCha20Rng::from_seed(seed))
 }
 
 fn derive_key(passphrase: &str, salt: &[u8; 32]) -> Result<DerivedKey, IdentityError> {

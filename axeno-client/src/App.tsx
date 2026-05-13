@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar/Sidebar";
@@ -8,25 +8,30 @@ import ChatSettings from "./components/ChatSettings/ChatSettings";
 import AddContact from "./components/AddContact/AddContact";
 import Onboarding from "./components/Onboarding/Onboarding";
 import VerifyIdentity from "./components/VerifyIdentity/VerifyIdentity";
-import { Contact, AppSettings, ServerChoice, defaultSettings } from "./types";
-import { mockContacts, mockMessages } from "./mockData";
+import {
+  Contact, Message, AppSettings, ServerChoice, defaultSettings,
+  MessagingSnapshot, BackendMessage, BackendContact, contactFromBackend, messageFromBackend,
+} from "./types";
 import "./App.css";
 import "./components/Onboarding/Onboarding.css";
 
-interface UnlockResponse {
-  fingerprint: string;
-  display_name: string;
-}
-
+interface UnlockResponse { fingerprint: string; display_name: string; }
 type TorStatus = "connecting" | "connected" | "failed";
-
-interface TorStatusEvent {
-  status: TorStatus;
-  reason?: string;
-}
+interface TorStatusEvent { status: TorStatus; reason?: string; }
+interface IncomingEnvelopeEvent { server_id: string; envelope: { id: string; to: string; envelope_type: string; ciphertext: string; }; }
+interface IncomingMessageEvent { contact_id: string; message: BackendMessage; }
+interface SendMessageResponse { message: BackendMessage; }
 
 function computeInitials(name: string): string {
   return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
+}
+
+function groupMessages(snapshot: MessagingSnapshot): Record<string, Message[]> {
+  const result: Record<string, Message[]> = {};
+  Object.entries(snapshot.messages).forEach(([contactId, msgs]) => {
+    result[contactId] = msgs.map(messageFromBackend);
+  });
+  return result;
 }
 
 export default function App() {
@@ -40,8 +45,9 @@ export default function App() {
   const [loginError, setLoginError] = useState("");
   const [isUnlocking, setIsUnlocking] = useState(false);
 
-  const [contacts, setContacts] = useState<Contact[]>(mockContacts);
-  const [activeContactId, setActiveContactId] = useState("ax7f2c");
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [messages, setMessages] = useState<Record<string, Message[]>>({});
+  const [activeContactId, setActiveContactId] = useState("");
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
 
   const [showSettings, setShowSettings] = useState(false);
@@ -49,10 +55,47 @@ export default function App() {
   const [showChatSettings, setShowChatSettings] = useState(false);
   const [showVerify, setShowVerify] = useState(false);
 
+  const loadMessaging = useCallback(async () => {
+    const snap = await invoke<MessagingSnapshot>("messaging_snapshot");
+    const nextContacts = snap.contacts.map(contactFromBackend);
+    setContacts(nextContacts);
+    setMessages(groupMessages(snap));
+    setActiveContactId(prev => prev || nextContacts[0]?.id || "");
+    await invoke("messaging_connect_all").catch(() => {});
+  }, []);
+
   useEffect(() => {
-    const unlisten = listen<TorStatusEvent>("tor-status", (event) => {
+    const unlistenTor = listen<TorStatusEvent>("tor-status", (event) => {
       setTorStatus(event.payload.status);
       setTorError(event.payload.reason ?? "");
+      if (event.payload.status === "connected") invoke("messaging_connect_all").catch(() => {});
+    });
+
+    const unlistenEnvelope = listen<IncomingEnvelopeEvent>("axeno-envelope", async (event) => {
+      try {
+        await invoke("messaging_handle_incoming_envelope", {
+          serverId: event.payload.server_id,
+          envelope: event.payload.envelope,
+        });
+        await invoke("transport_ack_envelopes", {
+          serverId: event.payload.server_id,
+          ids: [event.payload.envelope.id],
+        });
+      } catch {
+        // Leave it queued if decryption failed; this avoids deleting data we cannot read.
+      }
+    });
+
+    const unlistenMessage = listen<IncomingMessageEvent>("axeno-message", (event) => {
+      const msg = messageFromBackend(event.payload.message);
+      setContacts(prev => prev.some(c => c.id === event.payload.contact_id) ? prev : prev);
+      setMessages(prev => {
+        const existing = prev[event.payload.contact_id] ?? [];
+        if (existing.some(m => m.id === msg.id)) return prev;
+        return { ...prev, [event.payload.contact_id]: [...existing, msg] };
+      });
+      setActiveContactId(prev => prev || event.payload.contact_id);
+      loadMessaging().catch(() => {});
     });
 
     const init = async () => {
@@ -66,8 +109,12 @@ export default function App() {
     };
     init();
 
-    return () => { unlisten.then(f => f()); };
-  }, []);
+    return () => {
+      unlistenTor.then(f => f());
+      unlistenEnvelope.then(f => f());
+      unlistenMessage.then(f => f());
+    };
+  }, [loadMessaging]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -76,8 +123,8 @@ export default function App() {
     try {
       const res = await invoke<UnlockResponse>("unlock_identity", { passphrase: loginPassword });
       setDisplayName(res.display_name);
-      // The password is consumed by the backend. Clear the React state immediately.
       setLoginPassword("");
+      await loadMessaging();
       setAppState("chat");
     } catch {
       setLoginError("Incorrect password.");
@@ -86,26 +133,36 @@ export default function App() {
     }
   };
 
-  const active = contacts.find(c => c.id === activeContactId)!;
+  const handleOnboardingComplete = async (name: string) => {
+    setDisplayName(name);
+    await loadMessaging().catch(() => {});
+    setAppState("chat");
+  };
+
+  const handleAddedContact = async (contact: BackendContact) => {
+    const c = contactFromBackend(contact);
+    setContacts(prev => prev.some(x => x.id === c.id) ? prev : [...prev, c]);
+    setActiveContactId(c.id);
+    await invoke("messaging_connect_all").catch(() => {});
+  };
+
+  const sendMessage = async (contactId: string, text: string) => {
+    const res = await invoke<SendMessageResponse>("messaging_send_text_message", { contactId, text });
+    const msg = messageFromBackend(res.message);
+    setMessages(prev => ({ ...prev, [contactId]: [...(prev[contactId] ?? []), msg] }));
+  };
+
+  const active = contacts.find(c => c.id === activeContactId) || contacts[0];
 
   const updateContactServer = (id: string, server: ServerChoice) => {
     setContacts(prev => prev.map(c => (c.id === id ? { ...c, serverChoice: server } : c)));
   };
 
   if (appState === "loading") {
-    return (
-      <div className="app-root" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div className="onboarding-spinner" style={{ borderColor: "var(--border)", borderTopColor: "var(--brand)" }} />
-      </div>
-    );
+    return <div className="app-root" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}><div className="onboarding-spinner" style={{ borderColor: "var(--border)", borderTopColor: "var(--brand)" }} /></div>;
   }
 
-  if (appState === "onboarding") {
-    return <Onboarding onComplete={(name) => {
-      setDisplayName(name);
-      setAppState("chat");
-    }} />;
-  }
+  if (appState === "onboarding") return <Onboarding onComplete={handleOnboardingComplete} />;
 
   if (appState === "login") {
     return (
@@ -113,18 +170,9 @@ export default function App() {
         <div className="onboarding-card">
           <h1 className="onboarding-title">Welcome back</h1>
           <form onSubmit={handleLogin} style={{ width: "100%" }}>
-            <input
-              type="password"
-              className="onboarding-key-input"
-              placeholder="Password"
-              value={loginPassword}
-              onChange={(e) => { setLoginPassword(e.target.value); setLoginError(""); }}
-              autoFocus
-            />
+            <input type="password" className="onboarding-key-input" placeholder="Password" value={loginPassword} onChange={(e) => { setLoginPassword(e.target.value); setLoginError(""); }} autoFocus />
             {loginError && <div className="onboarding-error">{loginError}</div>}
-            <button type="submit" className="btn btn-primary onboarding-btn" disabled={isUnlocking || !loginPassword}>
-              {isUnlocking ? "Unlocking..." : "Unlock"}
-            </button>
+            <button type="submit" className="btn btn-primary onboarding-btn" disabled={isUnlocking || !loginPassword}>{isUnlocking ? "Unlocking..." : "Unlock"}</button>
           </form>
         </div>
       </div>
@@ -133,49 +181,18 @@ export default function App() {
 
   return (
     <div className="app-root">
-      <Sidebar
-        contacts={contacts}
-        allMessages={mockMessages}
-        activeContactId={activeContactId}
-        onSelectContact={setActiveContactId}
-        onOpenAddContact={() => setShowAddContact(true)}
-        onOpenSettings={() => setShowSettings(true)}
-        myInitials={computeInitials(displayName)}
-        myDisplayName={displayName}
-        torStatus={torStatus}
-      />
+      <Sidebar contacts={contacts} allMessages={messages} activeContactId={active?.id ?? ""} onSelectContact={setActiveContactId} onOpenAddContact={() => setShowAddContact(true)} onOpenSettings={() => setShowSettings(true)} myInitials={computeInitials(displayName)} myDisplayName={displayName || "Me"} torStatus={torStatus} />
 
-      <ChatView
-        contact={active}
-        messages={mockMessages[active.id] || []}
-        onOpenChatSettings={() => setShowChatSettings(true)}
-      />
-
-      {showSettings && (
-        <Settings
-          settings={settings}
-          onChange={setSettings}
-          displayName={displayName}
-          onChangeName={setDisplayName}
-          onClose={() => setShowSettings(false)}
-          torStatus={torStatus}
-          torError={torError}
-        />
+      {active ? (
+        <ChatView contact={active} messages={messages[active.id] || []} onOpenChatSettings={() => setShowChatSettings(true)} onSendMessage={(text) => sendMessage(active.id, text)} />
+      ) : (
+        <main className="chat-view" style={{ display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)" }}>Generate a connection code or add a contact to start messaging.</main>
       )}
 
-      {showAddContact && <AddContact onClose={() => setShowAddContact(false)} />}
-
-      {showChatSettings && (
-        <ChatSettings
-          contact={active}
-          settings={settings}
-          onClose={() => setShowChatSettings(false)}
-          onOpenVerify={() => { setShowChatSettings(false); setShowVerify(true); }}
-          onUpdateContactServer={updateContactServer}
-        />
-      )}
-
-      {showVerify && <VerifyIdentity contact={active} onClose={() => setShowVerify(false)} />}
+      {showSettings && <Settings settings={settings} onChange={setSettings} displayName={displayName} onChangeName={setDisplayName} onClose={() => setShowSettings(false)} torStatus={torStatus} torError={torError} />}
+      {showAddContact && <AddContact onClose={() => setShowAddContact(false)} onAdded={handleAddedContact} />}
+      {showChatSettings && active && <ChatSettings contact={active} settings={settings} onClose={() => setShowChatSettings(false)} onOpenVerify={() => { setShowChatSettings(false); setShowVerify(true); }} onUpdateContactServer={updateContactServer} />}
+      {showVerify && active && <VerifyIdentity contact={active} onClose={() => setShowVerify(false)} />}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Contact, Message } from "../../types";
-import { contactInitials, formatMessageTime } from "../../utils";
+import { contactDisplayName, contactInitials, formatMessageTime } from "../../utils";
 import { IconDots, IconPaperclip, IconArrowUp } from "../icons";
 import "./ChatView.css";
 
@@ -8,17 +8,35 @@ interface Props {
   contact: Contact;
   messages: Message[];
   onOpenChatSettings: () => void;
+  onSendMessage: (text: string) => Promise<void>;
 }
 
-export default function ChatView({ contact, messages, onOpenChatSettings }: Props) {
+export default function ChatView({ contact, messages, onOpenChatSettings, onSendMessage }: Props) {
   const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState("");
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || sending) return;
+    setSending(true);
+    setSendError("");
+    try {
+      await onSendMessage(text);
+      setInput("");
+    } catch (e) {
+      setSendError(typeof e === "string" ? e : "Could not send message");
+    } finally {
+      setSending(false);
+    }
+  };
 
   return (
     <main className="chat-view">
       <header className="chat-header">
         <div className="chat-avatar">{contactInitials(contact)}</div>
         <div className="chat-header-info">
-          <div className="chat-contact-id">{contact.id}4e9b</div>
+          <div className="chat-contact-id">{contactDisplayName(contact)}</div>
         </div>
         <button className="chat-icon-button" onClick={onOpenChatSettings} aria-label="Chat settings">
           <IconDots />
@@ -59,16 +77,20 @@ export default function ChatView({ contact, messages, onOpenChatSettings }: Prop
             type="text"
             value={input}
             onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
             placeholder="Message"
             className="chat-input"
           />
           <button
             className={`chat-send ${input.length > 0 ? "active" : ""}`}
             aria-label="Send message"
+            onClick={send}
+            disabled={sending || !input.trim()}
           >
             <IconArrowUp />
           </button>
         </div>
+        {sendError && <div className="onboarding-error" style={{ marginTop: 8 }}>{sendError}</div>}
       </div>
     </main>
   );

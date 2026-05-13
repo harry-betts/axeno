@@ -1,7 +1,7 @@
 import { Contact, AppSettings, ServerChoice } from "../../types";
-import { contactInitials } from "../../utils";
+import { contactDisplayName, contactInitials } from "../../utils";
 import {
-  IconX, IconShield, IconTrash, IconUserX, IconChevronRight, IconChevronDown,
+  IconX, IconShield, IconChevronRight, IconChevronDown,
 } from "../icons";
 import "./ChatSettings.css";
 
@@ -44,7 +44,7 @@ export default function ChatSettings({ contact, settings, onClose, onOpenVerify,
         <div className="chat-settings-body">
           <div className="chat-settings-identity">
             <div className="chat-settings-avatar">{contactInitials(contact)}</div>
-            <div className="chat-settings-contact-id">{contact.id}4e9b...c2a1</div>
+            <div className="chat-settings-contact-id">{contactDisplayName(contact)}</div>
           </div>
 
           <div className="chat-settings-action-list">
@@ -75,36 +75,6 @@ export default function ChatSettings({ contact, settings, onClose, onOpenVerify,
               <span className="select-chevron"><IconChevronDown /></span>
             </div>
           </section>
-
-          <section className="chat-settings-section">
-            <div className="chat-settings-section-title">Disappearing messages</div>
-            <div className="chat-settings-section-desc">
-              Override the default for this conversation only.
-            </div>
-            <div className="select-wrap chat-settings-select-wrap">
-              <select className="select chat-settings-select" defaultValue="default">
-                <option value="default">Use default ({settings.defaultDisappearingMessages === 0 ? "Off" : "On"})</option>
-                <option value="0">Off</option>
-                <option value="3600">1 hour</option>
-                <option value="86400">1 day</option>
-                <option value="604800">7 days</option>
-                <option value="2592000">30 days</option>
-              </select>
-              <span className="select-chevron"><IconChevronDown /></span>
-            </div>
-          </section>
-
-          <div className="chat-settings-danger">
-            <button className="chat-settings-danger-btn">
-              <IconTrash /> Clear chat history
-            </button>
-            <button className="chat-settings-danger-btn">
-              <IconUserX /> Block contact
-            </button>
-            <button className="chat-settings-danger-btn destructive">
-              <IconTrash /> Delete contact
-            </button>
-          </div>
         </div>
       </aside>
     </>

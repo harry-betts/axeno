@@ -156,7 +156,7 @@ checksum = "5e15d2051582670d5c003deda168da03f0d3475f6375bca57d6b9852a9d32eed"
 dependencies = [
  "async-trait",
  "cfg-if",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "educe",
@@ -488,20 +488,25 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "arti-client",
+ "base64 0.22.1",
  "chacha20poly1305",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
  "libsignal-protocol",
- "rand 0.9.4",
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.5",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite",
  "tor-rtcompat",
+ "uuid",
  "zeroize",
 ]
 
@@ -1364,40 +1369,12 @@ dependencies = [
 
 [[package]]
 name = "derive-deftly"
-version = "0.14.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8ea84d0109517cc2253d4a679bdda1e8989e9bd86987e9e4f75ffdda0095fd1"
-dependencies = [
- "derive-deftly-macros 0.14.6",
- "heck 0.5.0",
-]
-
-[[package]]
-name = "derive-deftly"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "284db66a66f03c3dafbe17360d959eb76b83f77cfe191677e2a7899c0da291f3"
 dependencies = [
- "derive-deftly-macros 1.6.0",
+ "derive-deftly-macros",
  "heck 0.5.0",
-]
-
-[[package]]
-name = "derive-deftly-macros"
-version = "0.14.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "357422a457ccb850dc8f1c1680e0670079560feaad6c2e247e3f345c4fab8a3f"
-dependencies = [
- "heck 0.5.0",
- "indexmap 2.14.0",
- "itertools",
- "proc-macro-crate 3.5.0",
- "proc-macro2",
- "quote",
- "sha3",
- "strum 0.27.2",
- "syn 2.0.117",
- "void",
 ]
 
 [[package]]
@@ -4685,7 +4662,7 @@ version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e2023f41b5fcb7c30eb5300a5733edfaa9e0e0d502d51b586f65633fd39e40c"
 dependencies = [
- "derive-deftly 0.14.6",
+ "derive-deftly",
  "libc",
  "paste",
  "thiserror 2.0.18",
@@ -4733,6 +4710,7 @@ version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
 dependencies = [
+ "libc",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
 ]
@@ -4955,6 +4933,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ring"
+version = "0.17.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "getrandom 0.2.17",
+ "libc",
+ "untrusted",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5036,6 +5028,39 @@ dependencies = [
  "libc",
  "linux-raw-sys",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rustls"
+version = "0.23.40"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
+dependencies = [
+ "once_cell",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "rustls-pki-types"
+version = "1.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "rustls-webpki"
+version = "0.103.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+dependencies = [
+ "ring",
+ "rustls-pki-types",
+ "untrusted",
 ]
 
 [[package]]
@@ -6358,6 +6383,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-rustls"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
+dependencies = [
+ "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tungstenite",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6515,7 +6566,7 @@ version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4680d5ecdb052e950b31cd7c7852aa025968f648046e55251446d7d0e58138e"
 dependencies = [
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "educe",
  "futures",
  "oneshot-fused-workaround",
@@ -6554,7 +6605,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e86f91871fcd2e2fb16fcf55b7821b050b11d05d42b7e98104b662417bafda92"
 dependencies = [
  "bytes",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "digest",
  "educe",
  "getrandom 0.4.2",
@@ -6575,7 +6626,7 @@ dependencies = [
  "bitflags 2.11.1",
  "bytes",
  "caret",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_more",
  "educe",
  "itertools",
@@ -6623,7 +6674,7 @@ dependencies = [
  "base64ct",
  "caret",
  "cfg-if",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_more",
  "educe",
  "futures",
@@ -6678,7 +6729,7 @@ dependencies = [
  "amplify",
  "async-trait",
  "cfg-if",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "downcast-rs",
@@ -6727,7 +6778,7 @@ checksum = "24a1148697cfeeb8c35a3bd2ee3eb98a3510610635fca63e46bca33dfb3f450e"
 dependencies = [
  "amplify",
  "cfg-if",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "educe",
  "either",
@@ -6819,7 +6870,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c0e029a636b59ac25e4c2e261e306775dac5200c1632f99696cfc2c236b3b5d"
 dependencies = [
  "base64ct",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "getset",
  "humantime",
  "humantime-serde",
@@ -6927,7 +6978,7 @@ checksum = "119df8b27549a1db143713b9afde6d0d5ef1736b9fd03264715bce9d83616d10"
 dependencies = [
  "amplify",
  "base64ct",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "dyn-clone",
@@ -6970,7 +7021,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38f7f57feca263556c41c5d86129b6bd4b1f41dbfc566d070b112bd0bb1b6a21"
 dependencies = [
  "data-encoding",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_more",
  "digest",
  "hex",
@@ -6999,7 +7050,7 @@ version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cea1159867a98160a0629529fdb3615479d3f963b5ab92914dbcc6f0b68bf5c"
 dependencies = [
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_more",
  "downcast-rs",
  "paste",
@@ -7024,7 +7075,7 @@ dependencies = [
  "amplify",
  "arrayvec",
  "cfg-if",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "downcast-rs",
@@ -7065,7 +7116,7 @@ dependencies = [
  "base64ct",
  "by_address",
  "caret",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "hex",
@@ -7094,7 +7145,7 @@ dependencies = [
  "ctr",
  "curve25519-dalek",
  "der-parser",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_more",
  "digest",
  "ed25519-dalek",
@@ -7148,7 +7199,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aeeba11704612b6fb277d708d0ff9b471266084d86a6e557f858cdadaa61ca49"
 dependencies = [
  "cfg-if",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_more",
  "dyn-clone",
  "educe",
@@ -7178,7 +7229,7 @@ version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0178ecdfe9a2856232aaa41805dfd75b8512a21e8e6d02a67427d00e221b192b"
 dependencies = [
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "itertools",
  "paste",
  "void",
@@ -7222,7 +7273,7 @@ dependencies = [
  "amplify",
  "base64ct",
  "cipher",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "digest",
@@ -7263,7 +7314,7 @@ version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b6d2a9f700c0cbea6dd9b6b3614c47d26fbeffcb0ffdc10caf713a465fb913b"
 dependencies = [
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_more",
  "filetime",
  "fs-mistrust",
@@ -7300,7 +7351,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "coarsetime",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "digest",
@@ -7371,7 +7422,7 @@ version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7675f5d412acbdf62f8771553d3ca0cfad8afdd78f9b1f7c2befc370ce030bda"
 dependencies = [
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_more",
  "humantime",
  "tor-cert",
@@ -7440,7 +7491,7 @@ dependencies = [
  "amplify",
  "assert_matches",
  "async-trait",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_more",
  "educe",
  "futures",
@@ -7469,7 +7520,7 @@ checksum = "36d84b4d4a8680dc865c7a7c44ea5701be049b88276b818f7cd6529af28c2115"
 dependencies = [
  "amplify",
  "caret",
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "educe",
  "safelog",
  "subtle",
@@ -7484,7 +7535,7 @@ version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ae5c12f3bba5c4707f3a0a9c508320d6a4827e01e5e7ca0824ae55cbd2a737a"
 dependencies = [
- "derive-deftly 1.6.0",
+ "derive-deftly",
  "derive_more",
  "serde",
  "thiserror 2.0.18",
@@ -7647,6 +7698,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18e5b8366ee7a95b16d32197d0b2604b43a0be89dc5fac9f8e96ccafbaedda8a"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.8.6",
+ "rustls",
+ "rustls-pki-types",
+ "sha1",
+ "thiserror 1.0.69",
+ "utf-8",
+]
+
+[[package]]
 name = "typed-index-collections"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7756,6 +7827,12 @@ dependencies = [
  "crypto-common",
  "subtle",
 ]
+
+[[package]]
+name = "untrusted"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "unty"
@@ -8119,6 +8196,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.7",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "webview2-com"
 version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8388,6 +8483,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75283be5efb2831d37ea142365f009c02ec203cd29a3ebecbc093d52315b66d0"
 dependencies = [
  "windows-targets 0.42.2",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets 0.52.6",
 ]
 
 [[package]]

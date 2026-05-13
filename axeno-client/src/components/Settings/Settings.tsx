@@ -1,13 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AppSettings, InviteCode, PrivateServer, ServerChoice } from "../../types";
 import {
-  IconArrowLeft, IconKey, IconServer, IconShield, IconBell, IconEye,
+  IconArrowLeft, IconKey, IconServer, IconEye,
   IconInfo, IconCopy, IconPlus, IconTrash, IconCheck, IconChevronDown, IconEdit,
 } from "../icons";
 import { invoke } from "@tauri-apps/api/core";
 import "./Settings.css";
 
-type Section = "identity" | "servers" | "privacy" | "notifications" | "appearance" | "about";
+type Section = "identity" | "servers" | "appearance" | "about";
 
 interface Props {
   settings: AppSettings;
@@ -37,17 +37,13 @@ export default function Settings({
         <nav className="settings-nav">
           <NavItem icon={<IconKey />} label="Identity" active={section === "identity"} onClick={() => setSection("identity")} />
           <NavItem icon={<IconServer />} label="Servers" active={section === "servers"} onClick={() => setSection("servers")} />
-          <NavItem icon={<IconShield />} label="Privacy" active={section === "privacy"} onClick={() => setSection("privacy")} />
-          <NavItem icon={<IconBell />} label="Notifications" active={section === "notifications"} onClick={() => setSection("notifications")} />
           <NavItem icon={<IconEye />} label="Appearance" active={section === "appearance"} onClick={() => setSection("appearance")} />
           <NavItem icon={<IconInfo />} label="About" active={section === "about"} onClick={() => setSection("about")} />
         </nav>
 
         <main className="settings-content">
-          {section === "identity" && <IdentitySection displayName={displayName} onChangeName={onChangeName} inviteCodes={settings.inviteCodes} onChangeInviteCodes={(inviteCodes) => onChange({ ...settings, inviteCodes })} />}
+          {section === "identity" && <IdentitySection displayName={displayName} onChangeName={onChangeName} inviteCodes={settings.inviteCodes} onChangeInviteCodes={(inviteCodes) => onChange({ ...settings, inviteCodes })} defaultServerUrl={defaultServerUrl(settings)} />}
           {section === "servers" && <ServersSection settings={settings} onChange={onChange} />}
-          {section === "privacy" && <PrivacySection settings={settings} onChange={onChange} />}
-          {section === "notifications" && <NotificationsSection settings={settings} onChange={onChange} />}
           {section === "appearance" && <AppearanceSection settings={settings} onChange={onChange} />}
           {section === "about" && <AboutSection torStatus={torStatus} torError={torError} />}
         </main>
@@ -115,22 +111,30 @@ function Select<T extends string>({ value, options, onChange }: { value: T; opti
 
 // ---------- Sections ----------
 
-function generateCode(): string {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  const rand = (n: number) =>
-    Array.from({ length: n }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-  return `axn-${rand(4)}-${rand(4)}-${rand(4)}`;
-}
-
 function computeInitials(name: string): string {
   return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
 }
 
-function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInviteCodes }: {
+function compactConnectionCode(code: string): string {
+  if (code.length <= 34) return code;
+  return `${code.slice(0, 18)}…${code.slice(-10)}`;
+}
+
+function defaultServerUrl(settings: AppSettings): string {
+  const choice = settings.defaultServer;
+  if (choice.kind === "private") {
+    const server = settings.privateServers.find(s => s.id === choice.serverId);
+    if (server) return server.onion;
+  }
+  return "ws://127.0.0.1:8787/ws";
+}
+
+function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInviteCodes, defaultServerUrl }: {
   displayName: string;
   onChangeName: (name: string) => void;
   inviteCodes: InviteCode[];
   onChangeInviteCodes: (inviteCodes: InviteCode[]) => void;
+  defaultServerUrl: string;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(displayName);
@@ -165,12 +169,26 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
     setEditing(false);
   };
 
-  const addCode = () => {
-    const next: InviteCode = { id: `${Date.now()}`, code: generateCode(), createdAt: Date.now() };
-    onChangeInviteCodes([...inviteCodes, next]);
+  useEffect(() => {
+    invoke<Array<{ id: string; code: string; created_at: number }>>("messaging_list_connection_codes")
+      .then(codes => onChangeInviteCodes(codes.map(c => ({ id: c.id, code: c.code, createdAt: c.created_at }))))
+      .catch(() => {});
+  }, []);
+
+  const addCode = async () => {
+    try {
+      const next = await invoke<{ id: string; code: string; created_at: number }>("messaging_generate_connection_code", {
+        serverUrl: defaultServerUrl,
+      });
+      onChangeInviteCodes([...inviteCodes, { id: next.id, code: next.code, createdAt: next.created_at }]);
+      await invoke("messaging_connect_all").catch(() => {});
+    } catch (e) {
+      setSaveError(typeof e === "string" ? e : "Could not generate connection code");
+    }
   };
 
-  const removeCode = (id: string) => {
+  const removeCode = async (id: string) => {
+    await invoke("messaging_delete_connection_code", { id }).catch(() => {});
     onChangeInviteCodes(inviteCodes.filter(c => c.id !== id));
   };
 
@@ -248,7 +266,7 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
           )}
           {inviteCodes.map(c => (
             <div className="code-item" key={c.id}>
-              <span className="code-string">{c.code}</span>
+              <span className="code-string" title={c.code}>{compactConnectionCode(c.code)}</span>
               <div className="code-actions">
                 <button
                   className="code-action-btn"
@@ -272,7 +290,9 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
         <button className="btn btn-secondary inviteCodes-generate-btn" onClick={addCode}>
           <IconPlus /> Generate new code
         </button>
-      </div>      <Row
+      </div>
+
+      <Row
         label="Change password"
         description="Set a new password for encrypting your vault. Your private keys are re-encrypted with the new password."
         control={<button className="btn btn-secondary" onClick={() => setShowPwModal(true)}>Change…</button>}
@@ -394,7 +414,7 @@ function ServersSection({ settings, onChange }: { settings: AppSettings; onChang
           <input
             type="text"
             className="text-input mono"
-            placeholder="abc123...xyz.onion"
+            placeholder="ws://abc123...xyz.onion/ws"
             value={newOnion}
             onChange={e => setNewOnion(e.target.value)}
           />
@@ -431,59 +451,6 @@ function ServerOption({ name, description, selected, onClick, onDelete }: { name
   );
 }
 
-function PrivacySection({ settings, onChange }: { settings: AppSettings; onChange: (s: AppSettings) => void }) {
-  return (
-    <Section title="Privacy">
-      <Row
-        label="Read receipts"
-        description="Let contacts see when you have read their messages."
-        control={<Toggle on={settings.readReceipts} onChange={(v) => onChange({ ...settings, readReceipts: v })} />}
-      />
-      <Row
-        label="Default disappearing messages"
-        description="Set how long new conversations keep messages by default. Can be overridden per chat."
-        control={
-          <Select
-            value={String(settings.defaultDisappearingMessages) as any}
-            options={[
-              { value: "0", label: "Off" },
-              { value: "3600", label: "1 hour" },
-              { value: "86400", label: "1 day" },
-              { value: "604800", label: "7 days" },
-              { value: "2592000", label: "30 days" },
-            ]}
-            onChange={(v) => onChange({ ...settings, defaultDisappearingMessages: parseInt(v) })}
-          />
-        }
-      />
-    </Section>
-  );
-}
-
-function NotificationsSection({ settings, onChange }: { settings: AppSettings; onChange: (s: AppSettings) => void }) {
-  return (
-    <Section
-      title="Notifications"
-      description="Notifications are generated locally. They never include the server in the loop."
-    >
-      <Row
-        label="Enable notifications"
-        control={<Toggle on={settings.notificationsEnabled} onChange={(v) => onChange({ ...settings, notificationsEnabled: v })} />}
-      />
-      <Row
-        label="Show message preview"
-        description="Include the message text in the notification."
-        control={<Toggle on={settings.notificationShowPreview} onChange={(v) => onChange({ ...settings, notificationShowPreview: v })} />}
-      />
-      <Row
-        label="Show sender"
-        description="Include the contact identifier in the notification."
-        control={<Toggle on={settings.notificationShowSender} onChange={(v) => onChange({ ...settings, notificationShowSender: v })} />}
-      />
-    </Section>
-  );
-}
-
 function AppearanceSection({ settings, onChange }: { settings: AppSettings; onChange: (s: AppSettings) => void }) {
   return (
     <Section title="Appearance">
@@ -510,24 +477,21 @@ function AppearanceSection({ settings, onChange }: { settings: AppSettings; onCh
   );
 }
 
+
 function AboutSection({ torStatus, torError }: { torStatus: "connecting" | "connected" | "failed"; torError?: string }) {
   const torLabel =
     torStatus === "connected" ? "Connected" :
       torStatus === "connecting" ? "Bootstrapping…" :
         `Failed${torError ? `: ${torError}` : ""}`;
+
   return (
     <Section title="About">
       <div className="about-block">
         <div className="about-row"><span>Version</span><span className="mono">0.1.0-dev</span></div>
-        <div className="about-row"><span>Build</span><span className="mono">7f3c9a2</span></div>
-        <div className="about-row"><span>Protocol</span><span>Signal Protocol with PQXDH</span></div>
-        <div className="about-row"><span>Transport</span><span>Tor (arti embedded)</span></div>
+        <div className="about-row"><span>Protocol</span><span>1:1 text uses libsignal-protocol sessions and official libsignal Sealed Sender envelopes.</span></div>
+        <div className="about-row"><span>Relay metadata</span><span>Server receives destination mailbox, delivery-token proof, ciphertext size, and timing only.</span></div>
+        <div className="about-row"><span>Transport</span><span>Local WebSocket for development; .onion WebSocket through Tor for real relay use.</span></div>
         <div className="about-row"><span>Tor status</span><span>{torLabel}</span></div>
-      </div>
-      <div className="button-row">
-        <button className="btn btn-secondary">View source</button>
-        <button className="btn btn-secondary">Architecture spec</button>
-        <button className="btn btn-secondary">Warrant canary</button>
       </div>
     </Section>
   );

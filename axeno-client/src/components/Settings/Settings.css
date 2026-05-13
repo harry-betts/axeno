@@ -782,3 +782,12 @@
   border: 1px dashed var(--border-subtle);
   border-radius: 8px;
 }
+/* Keep the original compact connection-code look while the real backend code
+   remains long. The full code is still copied; this only affects display. */
+.code-string {
+  display: inline-block;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

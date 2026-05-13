@@ -1,5 +1,5 @@
 import { Contact, Message } from "../../types";
-import { contactInitials, formatMessageTime, lastMessage, unreadCount } from "../../utils";
+import { contactDisplayName, contactInitials, formatMessageTime, lastMessage, unreadCount } from "../../utils";
 import { IconSearch, IconPlus, IconSettings } from "../icons";
 import "./Sidebar.css";
 
@@ -53,7 +53,7 @@ export default function Sidebar({
             >
               <div className="avatar">{contactInitials(c)}</div>
               <div className="contact-info">
-                <div className="contact-id">{c.alias ?? c.id}</div>
+                <div className="contact-id">{contactDisplayName(c)}</div>
                 <div className="contact-preview">{preview}</div>
               </div>
               <div className="contact-meta">

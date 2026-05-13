@@ -23,6 +23,8 @@ use tokio::sync::Mutex;
 use tor_rtcompat::PreferredRuntime;
 
 pub mod identity;
+pub mod messaging;
+pub mod transport;
 
 use identity::{
     change_passphrase, create_identity as id_create, fingerprint, reseal_vault,
@@ -104,7 +106,7 @@ fn save_vault(app: &AppHandle, blob: &EncryptedIdentity) -> Result<(), String> {
     Ok(())
 }
 
-fn load_vault(app: &AppHandle) -> Result<EncryptedIdentity, String> {
+pub(crate) fn load_vault(app: &AppHandle) -> Result<EncryptedIdentity, String> {
     let path = vault_path(app)?;
     let data = fs::read(&path).map_err(|_| "vault file not found".to_string())?;
     serde_json::from_slice(&data).map_err(|_| "corrupted vault".to_string())
@@ -118,6 +120,13 @@ fn load_vault(app: &AppHandle) -> Result<EncryptedIdentity, String> {
 pub struct UnlockResponse {
     pub fingerprint: String,
     pub display_name: String,
+}
+
+#[derive(Serialize)]
+pub struct PublicIdentityResponse {
+    pub fingerprint: String,
+    pub public_key_hex: String,
+    pub registration_id: u16,
 }
 
 // --------------------------------------------------------------------------
@@ -179,6 +188,18 @@ async fn unlock_identity(
     });
 
     Ok(response)
+}
+
+
+/// Return public identity material only. Does not require decrypting private keys.
+#[tauri::command]
+async fn current_identity_public(app: AppHandle) -> Result<PublicIdentityResponse, String> {
+    let blob = load_vault(&app)?;
+    Ok(PublicIdentityResponse {
+        fingerprint: fingerprint(&blob),
+        public_key_hex: hex::encode(&blob.public_key),
+        registration_id: blob.registration_id,
+    })
 }
 
 /// Explicitly drop the in-memory session.
@@ -269,6 +290,154 @@ async fn bootstrap_tor(app: AppHandle, state: State<'_, AppTorState>) -> Result<
     Ok(())
 }
 
+
+// --------------------------------------------------------------------------
+// WebSocket transport commands
+// --------------------------------------------------------------------------
+
+#[tauri::command]
+async fn transport_connect_server(
+    app: AppHandle,
+    state: State<'_, transport::TransportState>,
+    tor: State<'_, AppTorState>,
+    server_id: String,
+    url: String,
+    recipient_id: String,
+    auth_token: String,
+    delivery_token: String,
+) -> Result<(), String> {
+    transport::connect_server(app, state, tor.client.clone(), server_id, url, recipient_id, auth_token, delivery_token).await
+}
+
+#[tauri::command]
+async fn transport_disconnect_server(
+    state: State<'_, transport::TransportState>,
+    server_id: String,
+) -> Result<(), String> {
+    transport::disconnect_server(state, server_id).await
+}
+
+#[tauri::command]
+async fn transport_poll_server(
+    state: State<'_, transport::TransportState>,
+    server_id: String,
+) -> Result<(), String> {
+    transport::poll_server(state, server_id).await
+}
+
+#[tauri::command]
+async fn transport_ack_envelopes(
+    state: State<'_, transport::TransportState>,
+    server_id: String,
+    ids: Vec<uuid::Uuid>,
+) -> Result<(), String> {
+    transport::ack_envelopes(state, server_id, ids).await
+}
+
+#[tauri::command]
+async fn transport_list_connections(
+    state: State<'_, transport::TransportState>,
+) -> Result<Vec<(String, String, String)>, String> {
+    transport::list_connections(state).await
+}
+
+
+#[tauri::command]
+async fn messaging_generate_connection_code(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    server_url: Option<String>,
+) -> Result<messaging::ConnectionCodeResponse, String> {
+    messaging::generate_connection_code(app, &session, server_url).await
+}
+
+#[tauri::command]
+async fn messaging_list_connection_codes(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+) -> Result<Vec<messaging::ConnectionCodeResponse>, String> {
+    messaging::list_connection_codes(app, &session).await
+}
+
+#[tauri::command]
+async fn messaging_delete_connection_code(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    id: String,
+) -> Result<(), String> {
+    messaging::delete_connection_code(app, &session, id).await
+}
+
+#[tauri::command]
+async fn messaging_add_contact_from_code(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    code: String,
+) -> Result<messaging::StoredContact, String> {
+    messaging::add_contact_from_code(app, &session, code).await
+}
+
+#[tauri::command]
+async fn messaging_snapshot(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+) -> Result<messaging::MessagingSnapshot, String> {
+    messaging::snapshot(app, &session).await
+}
+
+#[tauri::command]
+async fn messaging_connect_all(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    transport_state: State<'_, transport::TransportState>,
+    tor_state: State<'_, AppTorState>,
+) -> Result<(), String> {
+    messaging::connect_all(app, &session, transport_state, tor_state.client.clone()).await
+}
+
+#[tauri::command]
+fn messaging_send_text_message(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    transport_state: State<'_, transport::TransportState>,
+    contact_id: String,
+    text: String,
+) -> Result<messaging::SendMessageResponse, String> {
+    // libsignal's current Rust store futures are not Send, while async Tauri
+    // commands require Send futures because they are spawned onto the async
+    // runtime. Run this command synchronously and drive the async body on the
+    // current thread instead, so the non-Send libsignal futures never cross a
+    // thread boundary.
+    tauri::async_runtime::block_on(messaging::send_text_message(
+        app,
+        &session,
+        transport_state,
+        contact_id,
+        text,
+    ))
+}
+
+#[tauri::command]
+fn messaging_handle_incoming_envelope(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    runtime: State<'_, messaging::MessagingRuntimeState>,
+    transport_state: State<'_, transport::TransportState>,
+    server_id: String,
+    envelope: transport::StoredEnvelope,
+) -> Result<(), String> {
+    // See messaging_send_text_message: the libsignal decrypt path also contains
+    // non-Send store futures, so this command must not be an async Tauri command.
+    tauri::async_runtime::block_on(messaging::handle_incoming_envelope(
+        app,
+        &session,
+        runtime,
+        transport_state,
+        server_id,
+        envelope,
+    ))
+}
+
 // --------------------------------------------------------------------------
 // Entry point
 // --------------------------------------------------------------------------
@@ -281,15 +450,31 @@ pub fn run() {
             client: Arc::new(Mutex::new(None)),
         })
         .manage(AppSessionState::default())
+        .manage(messaging::MessagingRuntimeState::new())
+        .manage(transport::TransportState::new())
         .invoke_handler(tauri::generate_handler![
             has_identity,
             create_identity,
             unlock_identity,
             lock_identity,
             is_unlocked,
+            current_identity_public,
             update_display_name,
             change_password,
             bootstrap_tor,
+            messaging_generate_connection_code,
+            messaging_list_connection_codes,
+            messaging_delete_connection_code,
+            messaging_add_contact_from_code,
+            messaging_snapshot,
+            messaging_connect_all,
+            messaging_send_text_message,
+            messaging_handle_incoming_envelope,
+            transport_connect_server,
+            transport_disconnect_server,
+            transport_poll_server,
+            transport_ack_envelopes,
+            transport_list_connections,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

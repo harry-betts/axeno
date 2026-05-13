@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Contact } from "../../types";
 import { IconArrowLeft, IconQR, IconCheck } from "../icons";
+import { contactDisplayName } from "../../utils";
 import "./VerifyIdentity.css";
 
 interface Props {
@@ -8,12 +9,11 @@ interface Props {
   onClose: () => void;
 }
 
-// 60 digits in 12 groups of 5
-const mockSafetyNumber = [
-  "39472", "10384", "82910", "47291",
-  "63782", "29047", "10583", "73920",
-  "48291", "10472", "92831", "47102",
-];
+function safetyGroups(value?: string): string[] {
+  const raw = (value || "pending-first-contact").replace(/[^a-fA-F0-9]/g, "").toUpperCase();
+  const groups = raw.match(/.{1,4}/g) || ["PENDING"];
+  return groups.slice(0, 12);
+}
 
 export default function VerifyIdentity({ contact, onClose }: Props) {
   const [verified, setVerified] = useState(false);
@@ -29,7 +29,7 @@ export default function VerifyIdentity({ contact, onClose }: Props) {
 
       <div className="verify-content">
         <div className="verify-header">
-          <h1 className="verify-title">Verify {contact.id}</h1>
+          <h1 className="verify-title">Verify {contactDisplayName(contact)}</h1>
           <p className="verify-desc">
             Compare these numbers with your contact in person, over a video call, or any
             other channel you trust. If they match on both sides, your conversation is
@@ -53,7 +53,7 @@ export default function VerifyIdentity({ contact, onClose }: Props) {
         <div className="verify-safety-number">
           {Array.from({ length: 4 }).map((_, rowIdx) => (
             <div key={rowIdx} className="verify-safety-row">
-              {mockSafetyNumber.slice(rowIdx * 3, rowIdx * 3 + 3).map((g, i) => (
+              {safetyGroups(contact.safetyNumber).slice(rowIdx * 3, rowIdx * 3 + 3).map((g, i) => (
                 <span key={i} className="verify-safety-group">{g}</span>
               ))}
             </div>

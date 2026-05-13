@@ -31,10 +31,15 @@ tor-rtcompat = { version = "0.41", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
-# getrandom for our own secure key generation
-# rand 0.8 uses rand_core 0.6, matching libsignal-protocol's trait bounds
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+base64 = "0.22"
+
+# getrandom for our own secure key generation; rand_core/rand_chacha 0.9 match current libsignal-protocol
 getrandom = "0.2"
-rand = "0.9"
+rand_core = "0.9"
+rand_chacha = "0.9"
 
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }

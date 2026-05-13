@@ -1,21 +1,26 @@
 export interface InviteCode {
   id: string;
   code: string;
-  createdAt: number; // Unix ms
+  createdAt: number;
 }
 
 export interface Contact {
   id: string;
-  alias?: string;            // user-settable local label; initials fall back to first 2 chars of id
-  lastReadAt: number | null; // Unix ms of last read received message; null = never
+  displayName?: string | null;
+  lastReadAt: number | null;
+  recipientId?: string;
+  serverUrl?: string;
+  serverId?: string;
+  safetyNumber?: string;
   serverChoice?: ServerChoice;
 }
 
 export interface Message {
-  id: string;        // UUID — globally unique, safe for retry / out-of-order delivery
+  id: string;
   mine: boolean;
   text: string;
-  timestamp: number; // Unix ms
+  timestamp: number;
+  status?: string;
 }
 
 export interface PrivateServer {
@@ -39,7 +44,6 @@ export interface AppSettings {
   notificationShowSender: boolean;
   sendOnEnter: boolean;
   messageTextSize: "small" | "medium" | "large";
-  // messageRetentionDays removed: retention is a per-server config, not a client setting
 }
 
 export const defaultSettings: AppSettings = {
@@ -54,3 +58,57 @@ export const defaultSettings: AppSettings = {
   sendOnEnter: true,
   messageTextSize: "medium",
 };
+
+export interface BackendContact {
+  id: string;
+  display_name?: string | null;
+  recipient_id: string;
+  server_url: string;
+  server_id: string;
+  safety_number: string;
+  identity_public_b64?: string;
+  registration_id?: number;
+  device_id?: number;
+  delivery_token?: string;
+  trust_state?: string;
+  signed_prekey_id?: number;
+  opk_id?: number | null;
+  last_read_at?: number | null;
+}
+
+export interface BackendMessage {
+  id: string;
+  contact_id: string;
+  mine: boolean;
+  text: string;
+  timestamp: number;
+  status: string;
+}
+
+export interface MessagingSnapshot {
+  my_recipient_id: string;
+  contacts: BackendContact[];
+  messages: Record<string, BackendMessage[]>;
+}
+
+export function contactFromBackend(c: BackendContact): Contact {
+  return {
+    id: c.id,
+    displayName: c.display_name,
+    lastReadAt: c.last_read_at ?? null,
+    recipientId: c.recipient_id,
+    serverUrl: c.server_url,
+    serverId: c.server_id,
+    safetyNumber: c.safety_number,
+  };
+}
+
+export function messageFromBackend(m: BackendMessage): Message {
+  return {
+    id: m.id,
+    mine: m.mine,
+    text: m.text,
+    timestamp: m.timestamp,
+    status: m.status,
+  };
+}
