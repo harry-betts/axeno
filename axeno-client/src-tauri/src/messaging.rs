@@ -38,6 +38,8 @@ const ENVELOPE_TYPE_SIGNAL: &str = "axeno_signal_v1";
 const ENVELOPE_TYPE_SEALED_SIGNAL: &str = "axeno_sealed_signal_v1";
 const DEVICE_ID: u32 = 1;
 const CONNECTION_CODE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+const VERIFY_PREFIX: &str = "axv1_";
+const VERIFY_CODE_TTL_MS: u64 = 10 * 60 * 1000;
 
 #[derive(Default)]
 pub struct MessagingRuntimeState {
@@ -187,7 +189,10 @@ pub struct PendingInvite {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ConnectionCodeResponse { pub id: String, pub code: String, pub created_at: u64 }
+pub struct ConnectionCodeResponse { pub id: String, pub code: String, pub created_at: u64, pub server_url: String }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VerificationCodeResponse { pub code: String, pub safety_number: String, pub created_at: u64 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MessagingSnapshot {
@@ -222,6 +227,16 @@ struct InvitePayload {
     kyber_prekey_id: Option<u32>,
     kyber_prekey_public_b64: Option<String>,
     kyber_prekey_signature_b64: Option<String>,
+    created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VerificationPayload {
+    v: u16,
+    kind: String,
+    local_identity_public_b64: String,
+    remote_identity_public_b64: String,
+    safety_number: String,
     created_at_ms: u64,
 }
 
@@ -547,14 +562,25 @@ fn cleanup_expired_routes(store: &mut MessagingStore) {
 
 fn ensure_route_for_contact(store: &mut MessagingStore, contact_id: &str, server_url: &str) -> Result<LocalRoute, String> {
     cleanup_expired_routes(store);
+    let normalized = normalize_server_url(Some(server_url.to_string()));
     if let Some(existing_route_id) = store.contacts.iter().find(|c| c.id == contact_id).and_then(|c| c.local_route_id.clone()) {
         if let Some(route) = store.local_routes.iter_mut().find(|r| r.id == existing_route_id) {
-            route.server_url = normalize_server_url(Some(server_url.to_string()));
-            route.server_id = server_id_for_url(&route.server_url);
-            route.expires_at_ms = None;
-            route.active = true;
-            ensure_route_cert_key(route)?;
-            return Ok(route.clone());
+            if route.server_url == normalized && route.active {
+                route.expires_at_ms = None;
+                ensure_route_cert_key(route)?;
+                return Ok(route.clone());
+            }
+        }
+    }
+    rotate_local_route_for_contact(store, contact_id, &normalized)
+}
+
+fn rotate_local_route_for_contact(store: &mut MessagingStore, contact_id: &str, server_url: &str) -> Result<LocalRoute, String> {
+    let old_route_id = store.contacts.iter().find(|c| c.id == contact_id).and_then(|c| c.local_route_id.clone());
+    if let Some(old_id) = old_route_id.as_ref() {
+        if let Some(old_route) = store.local_routes.iter_mut().find(|r| &r.id == old_id) {
+            old_route.active = false;
+            old_route.expires_at_ms = Some(now_ms());
         }
     }
     let route = new_local_route(server_url.to_string(), format!("contact:{contact_id}"), None)?;
@@ -612,6 +638,17 @@ fn code_to_payload(code: &str) -> Result<InvitePayload, String> {
 fn payload_to_code(payload: &InvitePayload) -> Result<String, String> {
     Ok(format!("{}{}", INVITE_PREFIX, URL_SAFE_NO_PAD.encode(serde_json::to_vec(payload).map_err(|e| e.to_string())?)))
 }
+
+fn verification_payload_to_code(payload: &VerificationPayload) -> Result<String, String> {
+    Ok(format!("{}{}", VERIFY_PREFIX, URL_SAFE_NO_PAD.encode(serde_json::to_vec(payload).map_err(|e| e.to_string())?)))
+}
+
+fn code_to_verification_payload(code: &str) -> Result<VerificationPayload, String> {
+    let encoded = code.trim().strip_prefix(VERIFY_PREFIX).ok_or_else(|| "verification code must start with axv1_".to_string())?;
+    let bytes = URL_SAFE_NO_PAD.decode(encoded.as_bytes()).map_err(|_| "verification code base64 is invalid".to_string())?;
+    serde_json::from_slice::<VerificationPayload>(&bytes).map_err(|e| format!("verification code payload is invalid: {e}"))
+}
+
 fn normalize_server_url(url: Option<String>) -> String {
     let raw = url.unwrap_or_else(|| DEFAULT_DEV_SERVER.to_string()).trim().to_string();
     if raw.ends_with("/ws") { raw }
@@ -629,6 +666,9 @@ fn contact_from_payload(payload: InvitePayload, local_identity_public: &[u8]) ->
     }
     let server_url = normalize_server_url(Some(payload.server_url.clone()));
     let identity_public = STANDARD_NO_PAD.decode(payload.identity_public_b64.as_bytes()).map_err(|_| "bad identity public key in code".to_string())?;
+    if identity_public == local_identity_public {
+        return Err("this connection code belongs to your own identity".into());
+    }
     Ok(StoredContact {
         id: payload.mailbox_id.clone(),
         display_name: Some(payload.display_name.clone()).filter(|s| !s.trim().is_empty()),
@@ -715,14 +755,14 @@ pub async fn generate_connection_code(app: AppHandle, session: &AppSessionState,
     store.local_routes.push(route);
     store.pending_invites.push(pending.clone());
     save_store_with_key(&app, &store, &store_key)?;
-    Ok(ConnectionCodeResponse { id: pending.id, code, created_at: pending.created_at_ms })
+    Ok(ConnectionCodeResponse { id: pending.id, code, created_at: pending.created_at_ms, server_url: pending.server_url })
 }
 
 pub async fn list_connection_codes(app: AppHandle, session: &AppSessionState) -> Result<Vec<ConnectionCodeResponse>, String> {
     let (store_key, legacy_store_key) = store_keys(session).await?;
     let mut store = load_store_with_keys(&app, &store_key, &legacy_store_key)?;
     cleanup_expired_routes(&mut store);
-    let out = store.pending_invites.iter().cloned().map(|p| ConnectionCodeResponse { id: p.id, code: p.code, created_at: p.created_at_ms }).collect();
+    let out = store.pending_invites.iter().cloned().map(|p| ConnectionCodeResponse { id: p.id, code: p.code, created_at: p.created_at_ms, server_url: p.server_url }).collect();
     save_store_with_key(&app, &store, &store_key)?;
     Ok(out)
 }
@@ -934,6 +974,11 @@ pub async fn handle_incoming_envelope(app: AppHandle, session: &AppSessionState,
     let decrypted = match decrypted_result {
         Ok(value) => value,
         Err(e) => {
+            // Persist any defensive state changes made before the decrypt path returned,
+            // such as trust-root pinning or identity_changed_blocked. Without this, a
+            // malicious changed-key envelope could trigger a warning only in memory and
+            // then disappear on restart.
+            let _ = save_store_with_key(&app, &store, &store_key);
             let mut failed = runtime.failed_envelopes.lock().await;
             let count = failed.entry(envelope_key.clone()).or_insert(0);
             *count = count.saturating_add(1);
@@ -987,8 +1032,71 @@ pub async fn mark_contact_verified(app: AppHandle, session: &AppSessionState, co
     if contact.trust_state == "identity_changed_blocked" && verified {
         return Err("contact identity changed; re-add using a fresh code before verifying".into());
     }
+    if verified && (contact.identity_public_b64.trim().is_empty() || contact.safety_number.trim().is_empty()) {
+        return Err("contact does not have enough identity material to verify yet".into());
+    }
     contact.trust_state = if verified { "verified" } else { "unverified" }.to_string();
     contact.verified_at_ms = if verified { Some(now_ms()) } else { None };
+    let out = contact.clone();
+    save_store_with_key(&app, &store, &store_key)?;
+    Ok(out)
+}
+
+pub async fn verification_code_for_contact(app: AppHandle, session: &AppSessionState, contact_id: String) -> Result<VerificationCodeResponse, String> {
+    let (store_key, legacy_store_key) = store_keys(session).await?;
+    let blob = load_vault(&app)?;
+    let store = load_store_with_keys(&app, &store_key, &legacy_store_key)?;
+    let contact = store.contacts.iter().find(|c| c.id == contact_id).ok_or_else(|| "contact not found".to_string())?;
+    if contact.identity_public_b64.trim().is_empty() || contact.safety_number.trim().is_empty() {
+        return Err("contact identity is not established yet; exchange at least one valid Signal message first".into());
+    }
+    let identity_public = STANDARD_NO_PAD.encode(&blob.public_key);
+    let created_at = now_ms();
+    let payload = VerificationPayload {
+        v: 1,
+        kind: "axeno_verify_v1".to_string(),
+        local_identity_public_b64: identity_public,
+        remote_identity_public_b64: contact.identity_public_b64.clone(),
+        safety_number: contact.safety_number.clone(),
+        created_at_ms: created_at,
+    };
+    let code = verification_payload_to_code(&payload)?;
+    Ok(VerificationCodeResponse { code, safety_number: contact.safety_number.clone(), created_at })
+}
+
+pub async fn verify_contact_with_code(app: AppHandle, session: &AppSessionState, contact_id: String, code: String) -> Result<StoredContact, String> {
+    let trimmed = code.trim().to_string();
+    if trimmed.is_empty() { return Err("verification code is empty".into()); }
+    let payload = code_to_verification_payload(&trimmed)?;
+    if payload.v != 1 || payload.kind != "axeno_verify_v1" {
+        return Err("unsupported verification code".into());
+    }
+    if payload.created_at_ms.saturating_add(VERIFY_CODE_TTL_MS) < now_ms() {
+        return Err("verification code has expired; ask them to generate a fresh one".into());
+    }
+
+    let (store_key, legacy_store_key) = store_keys(session).await?;
+    let blob = load_vault(&app)?;
+    let mut store = load_store_with_keys(&app, &store_key, &legacy_store_key)?;
+    let contact = store.contacts.iter_mut().find(|c| c.id == contact_id).ok_or_else(|| "contact not found".to_string())?;
+    if contact.trust_state == "identity_changed_blocked" {
+        return Err("contact identity changed; re-add using a fresh code before verifying".into());
+    }
+    if contact.identity_public_b64.trim().is_empty() || contact.safety_number.trim().is_empty() {
+        return Err("contact identity is not established yet; exchange at least one valid Signal message first".into());
+    }
+    let my_identity_b64 = STANDARD_NO_PAD.encode(&blob.public_key);
+    if payload.local_identity_public_b64 != contact.identity_public_b64 {
+        return Err("verification code was not generated by this contact identity".into());
+    }
+    if payload.remote_identity_public_b64 != my_identity_b64 {
+        return Err("verification code was generated for a different recipient identity".into());
+    }
+    if payload.safety_number != contact.safety_number {
+        return Err("verification code safety number does not match this conversation".into());
+    }
+    contact.trust_state = "verified".to_string();
+    contact.verified_at_ms = Some(now_ms());
     let out = contact.clone();
     save_store_with_key(&app, &store, &store_key)?;
     Ok(out)
@@ -1004,8 +1112,66 @@ pub async fn mark_contact_read(app: AppHandle, session: &AppSessionState, contac
     Ok(out)
 }
 
+pub async fn migrate_contact_with_code(app: AppHandle, session: &AppSessionState, contact_id: String, code: String) -> Result<StoredContact, String> {
+    let trimmed = code.trim().to_string();
+    if trimmed.is_empty() { return Err("migration code is empty".into()); }
+
+    let (store_key, legacy_store_key) = store_keys(session).await?;
+    let blob = load_vault(&app)?;
+    let incoming = contact_from_payload(code_to_payload(&trimmed)?, &blob.public_key)?;
+    let mut store = load_store_with_keys(&app, &store_key, &legacy_store_key)?;
+    cleanup_expired_routes(&mut store);
+
+    let pos = store.contacts.iter().position(|c| c.id == contact_id)
+        .ok_or_else(|| "contact not found".to_string())?;
+    let previous = store.contacts[pos].clone();
+
+    // A relay migration is only safe if the fresh code belongs to the same
+    // Signal identity. A different identity is a new contact or an attack, not
+    // a server move.
+    if previous.identity_public_b64 != incoming.identity_public_b64 {
+        store.contacts[pos].trust_state = "identity_changed_blocked".to_string();
+        store.contacts[pos].verified_at_ms = None;
+        save_store_with_key(&app, &store, &store_key)?;
+        return Err("fresh code has a different identity key; refusing relay migration".into());
+    }
+    if previous.device_id != incoming.device_id {
+        return Err("fresh code uses a different device id; create a new contact or verify out-of-band first".into());
+    }
+
+    let old_session_key = format!("{}:{}", previous.recipient_id, previous.device_id);
+    store.signal_sessions.remove(&old_session_key);
+
+    let route = rotate_local_route_for_contact(&mut store, &contact_id, &incoming.server_url)?;
+
+    let contact = &mut store.contacts[pos];
+    contact.display_name = incoming.display_name.clone().or_else(|| contact.display_name.clone());
+    contact.recipient_id = incoming.recipient_id.clone();
+    contact.server_url = incoming.server_url.clone();
+    contact.server_id = incoming.server_id.clone();
+    contact.registration_id = incoming.registration_id;
+    contact.device_id = incoming.device_id;
+    contact.signed_prekey_id = incoming.signed_prekey_id;
+    contact.signed_prekey_public_b64 = incoming.signed_prekey_public_b64.clone();
+    contact.signed_prekey_signature_b64 = incoming.signed_prekey_signature_b64.clone();
+    contact.opk_id = incoming.opk_id;
+    contact.opk_public_b64 = incoming.opk_public_b64.clone();
+    contact.kyber_prekey_id = incoming.kyber_prekey_id;
+    contact.kyber_prekey_public_b64 = incoming.kyber_prekey_public_b64.clone();
+    contact.kyber_prekey_signature_b64 = incoming.kyber_prekey_signature_b64.clone();
+    contact.delivery_token = incoming.delivery_token.clone();
+    contact.safety_number = incoming.safety_number.clone();
+    contact.local_route_id = Some(route.id.clone());
+    contact.trust_state = if previous.trust_state == "verified" { "verified".to_string() } else { "unverified".to_string() };
+    contact.verified_at_ms = previous.verified_at_ms;
+    let out = contact.clone();
+
+    save_store_with_key(&app, &store, &store_key)?;
+    Ok(out)
+}
+
 pub async fn update_contact_server(_app: AppHandle, _session: &AppSessionState, _contact_id: String, _server_url: String) -> Result<StoredContact, String> {
-    Err("changing a contact relay without a fresh connection code is unsafe; ask the contact for a new code".into())
+    Err("changing a contact relay without a fresh connection code is unsafe; use relay migration with a fresh code".into())
 }
 
 mod signal_protocol_engine {

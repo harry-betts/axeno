@@ -207,3 +207,37 @@
 .chat-settings-danger-btn.destructive:hover {
   background: var(--accent-red-dim);
 }
+
+.chat-settings-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+}
+
+.chat-settings-code-input {
+  width: 100%;
+  min-height: 112px;
+  resize: vertical;
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  padding: 12px;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  outline: none;
+}
+
+.chat-settings-code-input:focus {
+  border-color: var(--brand);
+}
+
+.chat-settings-error {
+  margin-top: 8px;
+  color: var(--danger, #ff6b6b);
+  font-size: 12px;
+}
+
+.chat-settings-button-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}

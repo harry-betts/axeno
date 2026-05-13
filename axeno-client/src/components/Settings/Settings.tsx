@@ -170,17 +170,17 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
   };
 
   useEffect(() => {
-    invoke<Array<{ id: string; code: string; created_at: number }>>("messaging_list_connection_codes")
-      .then(codes => onChangeInviteCodes(codes.map(c => ({ id: c.id, code: c.code, createdAt: c.created_at }))))
+    invoke<Array<{ id: string; code: string; created_at: number; server_url: string }>>("messaging_list_connection_codes")
+      .then(codes => onChangeInviteCodes(codes.map(c => ({ id: c.id, code: c.code, createdAt: c.created_at, serverUrl: c.server_url }))))
       .catch(() => {});
   }, []);
 
   const addCode = async () => {
     try {
-      const next = await invoke<{ id: string; code: string; created_at: number }>("messaging_generate_connection_code", {
+      const next = await invoke<{ id: string; code: string; created_at: number; server_url: string }>("messaging_generate_connection_code", {
         serverUrl: defaultServerUrl,
       });
-      onChangeInviteCodes([...inviteCodes, { id: next.id, code: next.code, createdAt: next.created_at }]);
+      onChangeInviteCodes([...inviteCodes, { id: next.id, code: next.code, createdAt: next.created_at, serverUrl: next.server_url }]);
       await invoke("messaging_connect_all").catch(() => {});
     } catch (e) {
       setSaveError(typeof e === "string" ? e : "Could not generate connection code");
@@ -266,7 +266,10 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
           )}
           {inviteCodes.map(c => (
             <div className="code-item" key={c.id}>
-              <span className="code-string" title={c.code}>{compactConnectionCode(c.code)}</span>
+              <div className="code-main">
+                <span className="code-string" title={c.code}>{compactConnectionCode(c.code)}</span>
+                <span className="code-server" title={c.serverUrl}>Relay: {c.serverUrl || "unknown"}</span>
+              </div>
               <div className="code-actions">
                 <button
                   className="code-action-btn"

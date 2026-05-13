@@ -173,6 +173,14 @@ export default function App() {
     setMessages(prev => ({ ...prev, [contactId]: [...(prev[contactId] ?? []), msg] }));
   };
 
+  const migrateContactRelay = async (contactId: string, code: string) => {
+    const updated = await invoke<BackendContact>("messaging_migrate_contact_with_code", { contactId, code });
+    const next = contactFromBackend(updated);
+    setContacts(prev => prev.map(c => c.id === contactId ? next : c));
+    await invoke("messaging_connect_all").catch(() => {});
+    await loadMessaging().catch(() => {});
+  };
+
   const selectContact = async (id: string) => {
     setActiveContactId(id);
     setContacts(prev => prev.map(c => c.id === id ? { ...c, lastReadAt: Date.now() } : c));
@@ -215,8 +223,8 @@ export default function App() {
 
       {showSettings && <Settings settings={settings} onChange={setSettings} displayName={displayName} onChangeName={setDisplayName} onClose={() => setShowSettings(false)} torStatus={torStatus} torError={torError} />}
       {showAddContact && <AddContact onClose={() => setShowAddContact(false)} onAdded={handleAddedContact} />}
-      {showChatSettings && active && <ChatSettings contact={active} onClose={() => setShowChatSettings(false)} onOpenVerify={() => { setShowChatSettings(false); setShowVerify(true); }} />}
-      {showVerify && active && <VerifyIdentity contact={active} onClose={() => setShowVerify(false)} />}
+      {showChatSettings && active && <ChatSettings contact={active} onClose={() => setShowChatSettings(false)} onOpenVerify={() => { setShowChatSettings(false); setShowVerify(true); }} onMigrateRelay={(code) => migrateContactRelay(active.id, code)} />}
+      {showVerify && active && <VerifyIdentity contact={active} onClose={() => setShowVerify(false)} onContactUpdated={(updated) => setContacts(prev => prev.map(c => c.id === updated.id ? updated : c))} />}
     </div>
   );
 }

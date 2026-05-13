@@ -141,31 +141,17 @@
   },
   "mailbox_auth": [
     [
-      "mbx_oIqtsVaFcBFQR-tnCvsci2PP19anZFqb",
-      {
-        "receive_auth_hash": "4d162664b4697127b50c4653ef16e250405f8b6fcc914d87c119e9c8eff250b1",
-        "delivery_token_hash": "f5ae45ad14c092efefa732e3b708e969ee5679a384972f5e5e7b65ba537b7294"
-      }
-    ],
-    [
-      "mbx_9Ov0QzxgsDaHRvkNKlGqVdSOizNYvyJH",
-      {
-        "receive_auth_hash": "40903bff4875f3f6a7a84e0ccb568666726786d27cd330aefebc6142ff236561",
-        "delivery_token_hash": "cd270d1522d9f7d308aa110659c37c36c18df77c62d2036713152a60c503fabe"
-      }
-    ],
-    [
-      "mbx_e9Hh3ewYiXLXTN1yH6W47n9wcFd03LMU",
-      {
-        "receive_auth_hash": "ad48713c0c6318669b61db738d145935eff0f78bbb97f917d60dffe4dd6bd963",
-        "delivery_token_hash": "34027c1b2f5ca9b05b0e132fcadbb57b66b1e0f4ae95b7dfea6f809589f271e0"
-      }
-    ],
-    [
       "mbx_ffQjOYymxZ4MZh6TJg7Jdps8GNAZxMyz",
       {
         "receive_auth_hash": "0d84f7d3e60d25360ed394fa4805ce36ff98208cf8886fe3610c8cf6f7d8a754",
         "delivery_token_hash": "149ad7b50457315d6a7ebaf7e715d566b01527069446f0a0397b1f22f137afb9"
+      }
+    ],
+    [
+      "mbx_oIqtsVaFcBFQR-tnCvsci2PP19anZFqb",
+      {
+        "receive_auth_hash": "4d162664b4697127b50c4653ef16e250405f8b6fcc914d87c119e9c8eff250b1",
+        "delivery_token_hash": "f5ae45ad14c092efefa732e3b708e969ee5679a384972f5e5e7b65ba537b7294"
       }
     ]
   ]

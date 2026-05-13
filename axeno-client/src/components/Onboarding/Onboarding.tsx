@@ -16,66 +16,10 @@ type Step =
   | "generating"
   | "set-password"
   | "set-profile"
-  | "transfer-show"
-  | "transfer-code"
   | "done";
-
-type GeneratingFor = "new" | "transfer";
-
-// Static QR pattern for the "Transfer" placeholder
-const QR_PATTERN = [
-  [1,1,1,1,1,1,1,0,1,0,1,0,1,0,1,1,1,1,1,1,1],
-  [1,0,0,0,0,0,1,0,1,1,0,1,0,0,1,0,0,0,0,0,1],
-  [1,0,1,1,1,0,1,0,0,0,1,1,1,0,1,0,1,1,1,0,1],
-  [1,0,1,1,1,0,1,0,1,0,0,1,0,0,1,0,1,1,1,0,1],
-  [1,0,1,1,1,0,1,0,0,1,1,0,1,0,1,0,1,1,1,0,1],
-  [1,0,0,0,0,0,1,0,1,0,1,1,0,0,1,0,0,0,0,0,1],
-  [1,1,1,1,1,1,1,0,1,0,1,0,1,0,1,1,1,1,1,1,1],
-  [0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0],
-  [1,1,0,1,0,1,1,1,0,0,1,0,0,1,0,1,0,0,1,0,1],
-  [0,1,0,0,1,0,0,1,1,0,0,1,0,1,0,0,1,0,0,1,0],
-  [1,0,1,1,0,1,1,0,0,1,1,0,1,0,1,0,0,1,1,0,1],
-  [0,1,0,1,1,0,0,1,1,0,0,1,0,1,0,1,0,0,1,0,0],
-  [1,0,0,0,1,1,1,0,0,1,0,0,1,0,0,0,1,1,0,1,0],
-  [0,0,0,0,0,0,0,0,1,0,1,1,0,1,1,0,0,1,0,0,1],
-  [1,1,1,1,1,1,1,0,1,0,0,1,0,0,0,1,0,1,1,0,1],
-  [1,0,0,0,0,0,1,0,0,1,1,0,1,0,1,0,1,0,0,1,0],
-  [1,0,1,1,1,0,1,0,1,0,0,1,0,0,0,1,0,1,0,0,1],
-  [1,0,1,1,1,0,1,0,0,1,1,0,1,0,1,0,0,0,1,1,0],
-  [1,0,1,1,1,0,1,0,1,0,0,1,0,0,0,1,1,0,0,0,1],
-  [1,0,0,0,0,0,1,0,0,1,0,0,1,0,1,0,0,1,0,1,0],
-  [1,1,1,1,1,1,1,0,1,0,1,1,0,1,0,1,0,0,1,0,1],
-];
-
-function FakeQRCode() {
-  const cell = 9;
-  const size = 21 * cell;
-  return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ display: "block" }}>
-      {QR_PATTERN.map((row, r) =>
-        row.map((on, c) =>
-          on ? (
-            <rect
-              key={`${r}-${c}`}
-              x={c * cell}
-              y={r * cell}
-              width={cell - 1}
-              height={cell - 1}
-              fill="var(--text-bright)"
-              rx={0.5}
-            />
-          ) : null
-        )
-      )}
-    </svg>
-  );
-}
 
 export default function Onboarding({ onComplete }: Props) {
   const [step, setStep] = useState<Step>("welcome");
-  const [generatingFor, setGeneratingFor] = useState<GeneratingFor>("new");
-  const [transferKey, setTransferKey] = useState("");
-  const [transferKeyError, setTransferKeyError] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordError, setPasswordError] = useState("");
@@ -83,12 +27,7 @@ export default function Onboarding({ onComplete }: Props) {
   const [displayName, setDisplayName] = useState("");
 
   const startNewIdentity = () => {
-    setGeneratingFor("new");
     setStep("set-profile");
-  };
-
-  const submitTransferKey = () => {
-    setTransferKeyError("Identity transfer is not implemented in this build. Create a new identity instead.");
   };
 
   const submitPassword = async () => {
@@ -122,10 +61,7 @@ export default function Onboarding({ onComplete }: Props) {
     }
   };
 
-  const loadingText =
-    generatingFor === "new"
-      ? { main: "Generating keys", sub: "This happens once and only on this device." }
-      : { main: "Receiving identity", sub: "Decrypting and importing your keypair." };
+  const loadingText = { main: "Generating keys", sub: "This happens once and only on this device." };
 
   return (
     <div className="onboarding-root">
@@ -171,9 +107,9 @@ export default function Onboarding({ onComplete }: Props) {
 
         {step === "choice" && (
           <>
-            <h1 className="onboarding-title">New or existing identity?</h1>
+            <h1 className="onboarding-title">Create your identity</h1>
             <p className="onboarding-text">
-              Create a fresh identity on this device, or bring one over from another device.
+              This build supports fresh local identities only. Device transfer is hidden until the protocol is genuinely implemented.
             </p>
 
             <div className="onboarding-choices">
@@ -186,40 +122,6 @@ export default function Onboarding({ onComplete }: Props) {
                 <span className="onboarding-choice-arrow">›</span>
               </button>
             </div>
-          </>
-        )}
-
-        {step === "transfer-show" && (
-          <>
-            <button className="onboarding-back" onClick={() => setStep("choice")}>← Back</button>
-            <h1 className="onboarding-title">Scan this code</h1>
-            <p className="onboarding-text">
-              Identity transfer is not implemented in this build yet. This placeholder is disabled so you do not accidentally create a fresh identity while thinking you restored an old one.
-            </p>
-            <div className="qr-code-container">
-              <FakeQRCode />
-            </div>
-            <button className="btn btn-primary onboarding-btn" onClick={() => setStep("transfer-code")}>
-View disabled import form
-            </button>
-          </>
-        )}
-
-        {step === "transfer-code" && (
-          <>
-            <button className="onboarding-back" onClick={() => setStep("transfer-show")}>← Back</button>
-            <h1 className="onboarding-title">Enter transfer code</h1>
-            <textarea
-              className="onboarding-key-input"
-              placeholder="Paste transfer code here…"
-              value={transferKey}
-              onChange={e => { setTransferKey(e.target.value); setTransferKeyError(""); }}
-              rows={3}
-            />
-            {transferKeyError && <div className="onboarding-error">{transferKeyError}</div>}
-            <button className="btn btn-primary onboarding-btn" onClick={submitTransferKey} disabled={!transferKey.trim()}>
-Import disabled
-            </button>
           </>
         )}
 

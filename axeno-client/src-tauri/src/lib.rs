@@ -441,12 +441,42 @@ async fn messaging_mark_contact_verified(
 }
 
 #[tauri::command]
+async fn messaging_verification_code_for_contact(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    contact_id: String,
+) -> Result<messaging::VerificationCodeResponse, String> {
+    messaging::verification_code_for_contact(app, &session, contact_id).await
+}
+
+#[tauri::command]
+async fn messaging_verify_contact_with_code(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    contact_id: String,
+    code: String,
+) -> Result<messaging::StoredContact, String> {
+    messaging::verify_contact_with_code(app, &session, contact_id, code).await
+}
+
+#[tauri::command]
 async fn messaging_mark_contact_read(
     app: AppHandle,
     session: State<'_, AppSessionState>,
     contact_id: String,
 ) -> Result<messaging::StoredContact, String> {
     messaging::mark_contact_read(app, &session, contact_id).await
+}
+
+
+#[tauri::command]
+async fn messaging_migrate_contact_with_code(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    contact_id: String,
+    code: String,
+) -> Result<messaging::StoredContact, String> {
+    messaging::migrate_contact_with_code(app, &session, contact_id, code).await
 }
 
 #[tauri::command]
@@ -513,7 +543,10 @@ pub fn run() {
             messaging_send_text_message,
             messaging_handle_incoming_envelope,
             messaging_mark_contact_verified,
+            messaging_verification_code_for_contact,
+            messaging_verify_contact_with_code,
             messaging_mark_contact_read,
+            messaging_migrate_contact_with_code,
             messaging_update_contact_server,
             transport_connect_server,
             transport_disconnect_server,

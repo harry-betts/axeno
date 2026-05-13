@@ -2,6 +2,7 @@ export interface InviteCode {
   id: string;
   code: string;
   createdAt: number;
+  serverUrl: string;
 }
 
 export interface Contact {
