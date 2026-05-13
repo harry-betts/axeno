@@ -363,9 +363,14 @@ async fn messaging_list_connection_codes(
 async fn messaging_delete_connection_code(
     app: AppHandle,
     session: State<'_, AppSessionState>,
+    transport_state: State<'_, transport::TransportState>,
     id: String,
 ) -> Result<(), String> {
-    messaging::delete_connection_code(app, &session, id).await
+    let connection_ids = messaging::delete_connection_code(app, &session, id).await?;
+    for connection_id in connection_ids {
+        let _ = transport::retire_mailbox(transport_state.clone(), connection_id).await;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -415,6 +420,26 @@ fn messaging_send_text_message(
         contact_id,
         text,
     ))
+}
+
+#[tauri::command]
+async fn messaging_mark_contact_verified(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    contact_id: String,
+    verified: bool,
+) -> Result<messaging::StoredContact, String> {
+    messaging::mark_contact_verified(app, &session, contact_id, verified).await
+}
+
+#[tauri::command]
+async fn messaging_update_contact_server(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    contact_id: String,
+    server_url: String,
+) -> Result<messaging::StoredContact, String> {
+    messaging::update_contact_server(app, &session, contact_id, server_url).await
 }
 
 #[tauri::command]
@@ -470,6 +495,8 @@ pub fn run() {
             messaging_connect_all,
             messaging_send_text_message,
             messaging_handle_incoming_envelope,
+            messaging_mark_contact_verified,
+            messaging_update_contact_server,
             transport_connect_server,
             transport_disconnect_server,
             transport_poll_server,

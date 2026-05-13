@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Contact } from "../../types";
 import { IconArrowLeft, IconQR, IconCheck } from "../icons";
 import { contactDisplayName } from "../../utils";
@@ -16,7 +17,24 @@ function safetyGroups(value?: string): string[] {
 }
 
 export default function VerifyIdentity({ contact, onClose }: Props) {
-  const [verified, setVerified] = useState(false);
+  const [verified, setVerified] = useState(contact.trustState === "verified");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const toggleVerified = async () => {
+    if (busy) return;
+    const next = !verified;
+    setBusy(true);
+    setError("");
+    try {
+      await invoke("messaging_mark_contact_verified", { contactId: contact.id, verified: next });
+      setVerified(next);
+    } catch (e) {
+      setError(typeof e === "string" ? e : "Could not update verification state");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="verify-root">
@@ -63,12 +81,14 @@ export default function VerifyIdentity({ contact, onClose }: Props) {
         <div className="verify-actions">
           <button
             className={`btn ${verified ? "btn-success" : "btn-primary"}`}
-            onClick={() => setVerified(!verified)}
+            onClick={toggleVerified}
+            disabled={busy}
           >
             {verified ? <><IconCheck /> Marked as verified</> : "Mark as verified"}
           </button>
+          {error && <div className="onboarding-error">{error}</div>}
           <p className="verify-fineprint">
-            If their key changes in the future, you will be prompted to verify again.
+            If their key changes in the future, this verified state is cleared and sending is blocked until you re-check it.
           </p>
         </div>
       </div>

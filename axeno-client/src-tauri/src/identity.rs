@@ -13,7 +13,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use libsignal_protocol::{IdentityKey, IdentityKeyPair, KeyPair, PrivateKey};
+use libsignal_protocol::{IdentityKey, IdentityKeyPair, KeyPair, PublicKey};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -335,7 +335,7 @@ pub fn fingerprint(blob: &EncryptedIdentity) -> String {
 pub fn verify_blob_structure(blob: &EncryptedIdentity) -> Result<(), IdentityError> {
     IdentityKey::decode(&blob.public_key).map_err(|e| IdentityError::Signal(e.to_string()))?;
     for opk in &blob.opks_public {
-        PrivateKey::deserialize(&opk.public_key)
+        PublicKey::deserialize(&opk.public_key)
             .map_err(|e| IdentityError::Signal(e.to_string()))?;
     }
     Ok(())

@@ -48,12 +48,23 @@ export default function App() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [messages, setMessages] = useState<Record<string, Message[]>>({});
   const [activeContactId, setActiveContactId] = useState("");
-  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [settings, setSettings] = useState<AppSettings>(() => {
+    try {
+      const raw = localStorage.getItem("axeno.settings.v1");
+      return raw ? { ...defaultSettings, ...JSON.parse(raw) } : defaultSettings;
+    } catch {
+      return defaultSettings;
+    }
+  });
 
   const [showSettings, setShowSettings] = useState(false);
   const [showAddContact, setShowAddContact] = useState(false);
   const [showChatSettings, setShowChatSettings] = useState(false);
   const [showVerify, setShowVerify] = useState(false);
+
+  useEffect(() => {
+    try { localStorage.setItem("axeno.settings.v1", JSON.stringify(settings)); } catch {}
+  }, [settings]);
 
   const loadMessaging = useCallback(async () => {
     const snap = await invoke<MessagingSnapshot>("messaging_snapshot");
@@ -154,8 +165,19 @@ export default function App() {
 
   const active = contacts.find(c => c.id === activeContactId) || contacts[0];
 
-  const updateContactServer = (id: string, server: ServerChoice) => {
-    setContacts(prev => prev.map(c => (c.id === id ? { ...c, serverChoice: server } : c)));
+  const updateContactServer = async (id: string, server: ServerChoice) => {
+    const serverUrl = server.kind === "official"
+      ? "ws://127.0.0.1:8787/ws"
+      : settings.privateServers.find(s => s.id === server.serverId)?.onion;
+    if (!serverUrl) return;
+    try {
+      const updated = await invoke<BackendContact>("messaging_update_contact_server", { contactId: id, serverUrl });
+      const mapped = { ...contactFromBackend(updated), serverChoice: server };
+      setContacts(prev => prev.map(c => (c.id === id ? mapped : c)));
+      await invoke("messaging_connect_all").catch(() => {});
+    } catch {
+      setContacts(prev => prev.map(c => (c.id === id ? { ...c, serverChoice: server } : c)));
+    }
   };
 
   if (appState === "loading") {

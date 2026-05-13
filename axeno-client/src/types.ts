@@ -13,7 +13,10 @@ export interface Contact {
   serverId?: string;
   safetyNumber?: string;
   serverChoice?: ServerChoice;
+  trustState?: string;
+  verifiedAtMs?: number | null;
 }
+
 
 export interface Message {
   id: string;
@@ -71,6 +74,8 @@ export interface BackendContact {
   device_id?: number;
   delivery_token?: string;
   trust_state?: string;
+  verified_at_ms?: number | null;
+  local_route_id?: string | null;
   signed_prekey_id?: number;
   opk_id?: number | null;
   last_read_at?: number | null;
@@ -82,6 +87,7 @@ export interface BackendMessage {
   mine: boolean;
   text: string;
   timestamp: number;
+  received_at_ms?: number | null;
   status: string;
 }
 
@@ -100,6 +106,8 @@ export function contactFromBackend(c: BackendContact): Contact {
     serverUrl: c.server_url,
     serverId: c.server_id,
     safetyNumber: c.safety_number,
+    trustState: c.trust_state,
+    verifiedAtMs: c.verified_at_ms ?? null,
   };
 }
 

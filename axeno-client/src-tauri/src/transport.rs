@@ -15,6 +15,8 @@ use tokio_tungstenite::{connect_async, client_async, tungstenite::{client::IntoC
 use tor_rtcompat::PreferredRuntime;
 use uuid::Uuid;
 
+const EXPECTED_PROTOCOL_VERSION: u16 = 3;
+
 #[derive(Default)]
 pub struct TransportState {
     connections: Arc<Mutex<HashMap<String, ServerConnection>>>,
@@ -53,6 +55,7 @@ enum ClientFrame {
     },
     Poll,
     Ack { ids: Vec<Uuid> },
+    RetireMailbox,
     Ping,
 }
 
@@ -112,9 +115,10 @@ pub async fn connect_server(
 
     let mut guard = state.connections.lock().await;
     if let Some(existing) = guard.get(&server_id) {
-        if existing.url == url && existing.recipient_id == recipient_id {
+        if existing.url == url && existing.recipient_id == recipient_id && !existing.outbound.is_closed() {
             return Ok(());
         }
+        guard.remove(&server_id);
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<ClientFrame>();
@@ -124,10 +128,14 @@ pub async fn connect_server(
     let app_for_task = app.clone();
     let pending_certs = state.pending_sender_certs.clone();
     let trust_roots = state.server_trust_roots.clone();
+    let connections = state.connections.clone();
     tokio::spawn(async move {
         let _ = emit_status(&app_for_task, &server_id, "connecting", None);
-        if let Err(e) = run_connection(app_for_task.clone(), tor_client, pending_certs, trust_roots, server_id.clone(), url, recipient_id, auth_token, delivery_token, rx).await {
-            let _ = emit_status(&app_for_task, &server_id, "failed", Some(e));
+        let result = run_connection(app_for_task.clone(), tor_client, pending_certs, trust_roots, server_id.clone(), url, recipient_id, auth_token, delivery_token, rx).await;
+        connections.lock().await.remove(&server_id);
+        match result {
+            Ok(()) => { let _ = emit_status(&app_for_task, &server_id, "disconnected", None); }
+            Err(e) => { let _ = emit_status(&app_for_task, &server_id, "failed", Some(e)); }
         }
     });
 
@@ -158,7 +166,7 @@ pub async fn send_envelope(
     let guard = state.connections.lock().await;
     let conn = guard.get(&server_id).ok_or_else(|| "server is not connected".to_string())?;
     conn.outbound.send(ClientFrame::SendEnvelope { to, delivery_token, envelope_type, ciphertext })
-        .map_err(|_| "server connection is closed".to_string())
+        .map_err(|_| "server connection is closed; reconnect and try again".to_string())
 }
 
 pub async fn request_sender_certificate(
@@ -187,10 +195,17 @@ pub async fn request_sender_certificate(
         return Err(e);
     }
 
-    timeout(Duration::from_secs(10), rx)
-        .await
-        .map_err(|_| "timed out waiting for sender certificate".to_string())?
-        .map_err(|_| "sender certificate response channel closed".to_string())
+    match timeout(Duration::from_secs(10), rx).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) => {
+            state.pending_sender_certs.lock().await.remove(&request_id);
+            Err("sender certificate response channel closed".to_string())
+        }
+        Err(_) => {
+            state.pending_sender_certs.lock().await.remove(&request_id);
+            Err("timed out waiting for sender certificate".to_string())
+        }
+    }
 }
 
 pub async fn get_server_trust_root(
@@ -206,7 +221,7 @@ pub async fn poll_server(
 ) -> Result<(), String> {
     let guard = state.connections.lock().await;
     let conn = guard.get(&server_id).ok_or_else(|| "server is not connected".to_string())?;
-    conn.outbound.send(ClientFrame::Poll).map_err(|_| "server connection is closed".to_string())
+    conn.outbound.send(ClientFrame::Poll).map_err(|_| "server connection is closed; reconnect and try again".to_string())
 }
 
 pub async fn ack_envelopes(
@@ -216,7 +231,22 @@ pub async fn ack_envelopes(
 ) -> Result<(), String> {
     let guard = state.connections.lock().await;
     let conn = guard.get(&server_id).ok_or_else(|| "server is not connected".to_string())?;
-    conn.outbound.send(ClientFrame::Ack { ids }).map_err(|_| "server connection is closed".to_string())
+    conn.outbound.send(ClientFrame::Ack { ids }).map_err(|_| "server connection is closed; reconnect and try again".to_string())
+}
+
+pub async fn retire_mailbox(
+    state: tauri::State<'_, TransportState>,
+    server_id: String,
+) -> Result<(), String> {
+    let conn = {
+        let guard = state.connections.lock().await;
+        guard.get(&server_id).map(|c| c.outbound.clone())
+    };
+    if let Some(outbound) = conn {
+        let _ = outbound.send(ClientFrame::RetireMailbox);
+    }
+    state.connections.lock().await.remove(&server_id);
+    Ok(())
 }
 
 pub async fn list_connections(state: tauri::State<'_, TransportState>) -> Result<Vec<(String, String, String)>, String> {
@@ -300,12 +330,29 @@ where
         let Message::Text(text) = message else { continue; };
         let frame: ServerFrame = serde_json::from_str(&text).map_err(|e| format!("bad server frame: {e}"))?;
         match frame {
-            ServerFrame::HelloOk { trust_root_b64, .. } => {
-                server_trust_roots.lock().await.insert(server_id.clone(), trust_root_b64);
+            ServerFrame::HelloOk { protocol_version, trust_root_b64, .. } => {
+                if protocol_version != EXPECTED_PROTOCOL_VERSION {
+                    return Err(format!("relay protocol mismatch: expected {EXPECTED_PROTOCOL_VERSION}, got {protocol_version}"));
+                }
+                let mut roots = server_trust_roots.lock().await;
+                if let Some(existing) = roots.get(&server_id) {
+                    if existing != &trust_root_b64 {
+                        return Err("relay trust root changed during this session".to_string());
+                    }
+                }
+                roots.insert(server_id.clone(), trust_root_b64);
+                drop(roots);
                 let _ = emit_status(&app, &server_id, "ready", None);
             }
             ServerFrame::SenderCertificate { request_id, certificate_b64, trust_root_b64, expires_at_ms } => {
-                server_trust_roots.lock().await.insert(server_id.clone(), trust_root_b64.clone());
+                let mut roots = server_trust_roots.lock().await;
+                if let Some(existing) = roots.get(&server_id) {
+                    if existing != &trust_root_b64 {
+                        return Err("relay trust root changed during sender-certificate issuance".to_string());
+                    }
+                }
+                roots.insert(server_id.clone(), trust_root_b64.clone());
+                drop(roots);
                 if let Some(tx) = pending_certs.lock().await.remove(&request_id) {
                     let _ = tx.send(SenderCertificateResponse { certificate_b64, trust_root_b64, expires_at_ms });
                 }
@@ -325,7 +372,6 @@ where
     }
 
     writer.abort();
-    let _ = emit_status(&app, &server_id, "disconnected", None);
     Ok(())
 }
 

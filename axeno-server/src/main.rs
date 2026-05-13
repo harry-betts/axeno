@@ -6,11 +6,12 @@
 //! - issue short-lived libsignal SenderCertificate objects;
 //! - store/forward sealed-sender ciphertext only.
 //!
-//! The relay must not receive sender identity during message delivery. Sender
-//! identity is only visible when a client explicitly requests a sender
-//! certificate for its authenticated mailbox.
+//! The relay never receives plaintext. It can still observe transport metadata:
+//! authenticated receive mailbox for the socket, destination mailbox, ciphertext
+//! size, and timing. Clients should use per-contact mailboxes and Tor to reduce
+//! cross-contact correlation; this relay is not a mixnet.
 
-use std::{collections::VecDeque, net::SocketAddr, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::VecDeque, fs, net::SocketAddr, path::PathBuf, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
 
 use axum::{
     extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State},
@@ -41,6 +42,8 @@ const MAX_FRAME_BYTES: usize = 512 * 1024;
 const MAX_TOTAL_QUEUED_BYTES: usize = 64 * 1024 * 1024;
 const PROTOCOL_VERSION: u16 = 3;
 const SENDER_CERT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+const RATE_WINDOW_MS: u64 = 60 * 1000;
+const MAX_FRAMES_PER_WINDOW: u32 = 600;
 
 type RecipientId = String;
 type ClientTx = mpsc::UnboundedSender<ServerFrame>;
@@ -52,6 +55,7 @@ struct AppState {
     mailbox_auth: Arc<DashMap<RecipientId, MailboxAuth>>,
     total_queued_bytes: Arc<AtomicUsize>,
     crypto: Arc<ServerCrypto>,
+    data_dir: Arc<PathBuf>,
 }
 
 struct ServerCrypto {
@@ -60,10 +64,24 @@ struct ServerCrypto {
     server_signing_private: PrivateKey,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct MailboxAuth {
     receive_auth_hash: String,
     delivery_token_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct DiskState {
+    crypto: Option<DiskCrypto>,
+    mailbox_auth: Vec<(RecipientId, MailboxAuth)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DiskCrypto {
+    trust_root_public: Vec<u8>,
+    trust_root_private: Vec<u8>,
+    server_signing_public: Vec<u8>,
+    server_signing_private: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +100,7 @@ enum ClientFrame {
     SendEnvelope { to: RecipientId, delivery_token: String, envelope_type: String, ciphertext: String },
     Poll,
     Ack { ids: Vec<Uuid> },
+    RetireMailbox,
     Ping,
 }
 
@@ -105,13 +124,24 @@ async fn main() -> anyhow::Result<()> {
 
     let bind = std::env::var("AXENO_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
     let addr: SocketAddr = bind.parse()?;
+    let data_dir = PathBuf::from(std::env::var("AXENO_DATA_DIR").unwrap_or_else(|_| "axeno-relay-data".to_string()));
+    fs::create_dir_all(&data_dir)?;
+    let mut disk = load_disk_state(&data_dir)?;
+    let crypto = init_server_crypto(&mut disk)?;
+    save_disk_state(&data_dir, &disk)?;
+
+    let mailbox_auth = Arc::new(DashMap::new());
+    for (rid, auth) in disk.mailbox_auth.iter().cloned() {
+        mailbox_auth.insert(rid, auth);
+    }
 
     let state = AppState {
         queues: Arc::new(DashMap::new()),
         online: Arc::new(DashMap::new()),
-        mailbox_auth: Arc::new(DashMap::new()),
+        mailbox_auth,
         total_queued_bytes: Arc::new(AtomicUsize::new(0)),
-        crypto: Arc::new(init_server_crypto()?),
+        crypto: Arc::new(crypto),
+        data_dir: Arc::new(data_dir),
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -125,16 +155,65 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_server_crypto() -> anyhow::Result<ServerCrypto> {
+fn init_server_crypto(disk: &mut DiskState) -> anyhow::Result<ServerCrypto> {
     let mut rng = fresh_rng()?;
-    let trust_root = KeyPair::generate(&mut rng);
-    let server_signing = KeyPair::generate(&mut rng);
+    let (trust_root, server_signing) = if let Some(saved) = disk.crypto.as_ref() {
+        (
+            KeyPair::from_public_and_private(&saved.trust_root_public, &saved.trust_root_private)?,
+            KeyPair::from_public_and_private(&saved.server_signing_public, &saved.server_signing_private)?,
+        )
+    } else {
+        let trust_root = KeyPair::generate(&mut rng);
+        let server_signing = KeyPair::generate(&mut rng);
+        disk.crypto = Some(DiskCrypto {
+            trust_root_public: trust_root.public_key.serialize().to_vec(),
+            trust_root_private: trust_root.private_key.serialize().to_vec(),
+            server_signing_public: server_signing.public_key.serialize().to_vec(),
+            server_signing_private: server_signing.private_key.serialize().to_vec(),
+        });
+        (trust_root, server_signing)
+    };
     let server_certificate = ServerCertificate::new(1, server_signing.public_key, &trust_root.private_key, &mut rng)?;
     Ok(ServerCrypto {
         trust_root_public_b64: STANDARD_NO_PAD.encode(trust_root.public_key.serialize()),
         server_certificate,
         server_signing_private: server_signing.private_key,
     })
+}
+
+fn disk_state_path(data_dir: &PathBuf) -> PathBuf { data_dir.join("relay-state.json") }
+
+fn load_disk_state(data_dir: &PathBuf) -> anyhow::Result<DiskState> {
+    let path = disk_state_path(data_dir);
+    if !path.exists() { return Ok(DiskState::default()); }
+    let raw = fs::read(path)?;
+    Ok(serde_json::from_slice(&raw)?)
+}
+
+fn save_disk_state(data_dir: &PathBuf, state: &DiskState) -> anyhow::Result<()> {
+    let path = disk_state_path(data_dir);
+    let tmp = path.with_extension("json.tmp");
+    let raw = serde_json::to_vec_pretty(state)?;
+    fs::write(&tmp, raw)?;
+    fs::rename(tmp, path)?;
+    Ok(())
+}
+
+fn persist_mailbox_auth(state: &AppState) {
+    let disk = DiskState {
+        crypto: None,
+        mailbox_auth: state.mailbox_auth.iter().map(|entry| (entry.key().clone(), entry.value().clone())).collect(),
+    };
+    let data_dir = state.data_dir.clone();
+    let crypto = state.crypto.clone();
+    // Keep crypto stable by reloading the existing disk crypto and replacing only auth.
+    if let Ok(mut existing) = load_disk_state(&data_dir) {
+        existing.mailbox_auth = disk.mailbox_auth;
+        if existing.crypto.is_none() {
+            let _ = crypto; // crypto is already live; this branch should only happen on disk corruption.
+        }
+        let _ = save_disk_state(&data_dir, &existing);
+    }
 }
 
 fn fresh_rng() -> anyhow::Result<ChaCha20Rng> {
@@ -163,10 +242,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     });
 
     let mut recipient_id: Option<RecipientId> = None;
+    let mut window_start_ms = now_ms();
+    let mut frame_count: u32 = 0;
 
     while let Some(incoming) = receiver.next().await {
         let Ok(msg) = incoming else { break; };
         let Message::Text(text) = msg else { continue; };
+        let now = now_ms();
+        if now.saturating_sub(window_start_ms) > RATE_WINDOW_MS {
+            window_start_ms = now;
+            frame_count = 0;
+        }
+        frame_count = frame_count.saturating_add(1);
+        if frame_count > MAX_FRAMES_PER_WINDOW { let _ = tx.send(err("rate_limited", "too many frames on this socket")); continue; }
         if text.len() > MAX_FRAME_BYTES { let _ = tx.send(err("too_large", "frame too large")); continue; }
 
         let frame = match serde_json::from_str::<ClientFrame>(&text) {
@@ -189,6 +277,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                 } else {
                     state.mailbox_auth.insert(rid.clone(), MailboxAuth { receive_auth_hash: auth_hash, delivery_token_hash: delivery_hash });
+                    persist_mailbox_auth(&state);
                 }
                 recipient_id = Some(rid.clone());
                 state.online.insert(rid.clone(), tx.clone());
@@ -233,7 +322,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
 
                 let env = StoredEnvelope { id: Uuid::new_v4(), to: to.clone(), envelope_type, ciphertext };
-                let delivered_live = state.online.get(&to).and_then(|live| live.send(ServerFrame::Envelope { envelope: env.clone() }).ok()).is_some();
+                let _delivered_live = state.online.get(&to).and_then(|live| live.send(ServerFrame::Envelope { envelope: env.clone() }).ok()).is_some();
 
                 let mut queue = state.queues.entry(to).or_default();
                 while queue.len() >= MAX_QUEUE_PER_RECIPIENT {
@@ -241,7 +330,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
                 state.total_queued_bytes.fetch_add(env.ciphertext.len(), Ordering::Relaxed);
                 queue.push_back(env.clone());
-                let _ = tx.send(ServerFrame::SendOk { id: env.id, queued: !delivered_live });
+                let _ = tx.send(ServerFrame::SendOk { id: env.id, queued: false });
             }
             ClientFrame::Poll => {
                 if let Some(rid) = recipient_id.as_ref() { flush_queue(&state, rid, &tx); }
@@ -251,6 +340,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 let Some(rid) = recipient_id.as_ref() else { let _ = tx.send(err("not_registered", "send hello first")); continue; };
                 let removed = remove_acked(&state, rid, &ids);
                 let _ = tx.send(ServerFrame::AckOk { removed });
+            }
+            ClientFrame::RetireMailbox => {
+                let Some(rid) = recipient_id.as_ref() else { let _ = tx.send(err("not_registered", "send hello first")); continue; };
+                state.mailbox_auth.remove(rid);
+                state.queues.remove(rid);
+                state.online.remove(rid);
+                persist_mailbox_auth(&state);
+                let _ = tx.send(ServerFrame::AckOk { removed: 0 });
+                break;
             }
             ClientFrame::Ping => { let _ = tx.send(ServerFrame::Pong { server_time_ms: now_ms() }); }
         }

@@ -88,13 +88,7 @@ export default function Onboarding({ onComplete }: Props) {
   };
 
   const submitTransferKey = () => {
-    if (transferKey.trim().length < 10) {
-      setTransferKeyError("Code too short. Make sure you copied the full transfer code.");
-      return;
-    }
-    setTransferKeyError("");
-    setGeneratingFor("transfer");
-    setStep("set-password");
+    setTransferKeyError("Identity transfer is not implemented in this build. Create a new identity instead.");
   };
 
   const submitPassword = async () => {
@@ -196,7 +190,7 @@ export default function Onboarding({ onComplete }: Props) {
                 <span className="onboarding-choice-icon"><IconSmartphone /></span>
                 <div className="onboarding-choice-body">
                   <div className="onboarding-choice-title">Transfer from device</div>
-                  <div className="onboarding-choice-desc">Bring your identity over from another device.</div>
+                  <div className="onboarding-choice-desc">Not implemented yet in this build.</div>
                 </div>
                 <span className="onboarding-choice-arrow">›</span>
               </button>
@@ -209,13 +203,13 @@ export default function Onboarding({ onComplete }: Props) {
             <button className="onboarding-back" onClick={() => setStep("choice")}>← Back</button>
             <h1 className="onboarding-title">Scan this code</h1>
             <p className="onboarding-text">
-              On your other device, scan the code to transfer your identity.
+              Identity transfer is not implemented in this build yet. This placeholder is disabled so you do not accidentally create a fresh identity while thinking you restored an old one.
             </p>
             <div className="qr-code-container">
               <FakeQRCode />
             </div>
             <button className="btn btn-primary onboarding-btn" onClick={() => setStep("transfer-code")}>
-              Enter a code instead
+View disabled import form
             </button>
           </>
         )}
@@ -233,7 +227,7 @@ export default function Onboarding({ onComplete }: Props) {
             />
             {transferKeyError && <div className="onboarding-error">{transferKeyError}</div>}
             <button className="btn btn-primary onboarding-btn" onClick={submitTransferKey} disabled={!transferKey.trim()}>
-              Import identity
+Import disabled
             </button>
           </>
         )}

@@ -10,7 +10,7 @@ interface Props {
   settings: AppSettings;
   onClose: () => void;
   onOpenVerify: () => void;
-  onUpdateContactServer: (id: string, server: ServerChoice) => void;
+  onUpdateContactServer: (id: string, server: ServerChoice) => void | Promise<void>;
 }
 
 export default function ChatSettings({ contact, settings, onClose, onOpenVerify, onUpdateContactServer }: Props) {
@@ -51,7 +51,7 @@ export default function ChatSettings({ contact, settings, onClose, onOpenVerify,
             <button className="chat-settings-action" onClick={onOpenVerify}>
               <span className="chat-settings-action-icon"><IconShield /></span>
               <span className="chat-settings-action-label">Verify identity</span>
-              <span className="chat-settings-action-status">Not verified</span>
+              <span className="chat-settings-action-status">{contact.trustState === "verified" ? "Verified" : contact.trustState === "identity_changed_blocked" ? "Key changed" : "Not verified"}</span>
               <span className="chat-settings-action-chevron"><IconChevronRight /></span>
             </button>
           </div>
@@ -67,7 +67,7 @@ export default function ChatSettings({ contact, settings, onClose, onOpenVerify,
                 value={selectValue}
                 onChange={(e) => onChangeServer(e.target.value)}
               >
-                <option value="official">Official servers</option>
+                <option value="official">Local dev relay</option>
                 {settings.privateServers.map(s => (
                   <option key={s.id} value={`private:${s.id}`}>{s.name}</option>
                 ))}

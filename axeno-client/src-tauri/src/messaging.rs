@@ -14,7 +14,7 @@
 //! needs: PreKeyBundle -> Session -> CiphertextMessage -> relay -> PreKeySignalMessage/SignalMessage
 //! decrypt -> persisted plaintext.
 
-use std::{collections::HashMap, fs, io::Write, path::PathBuf, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::{HashMap, VecDeque}, fs, io::Write, path::PathBuf, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 
 use base64::{engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD}, Engine as _};
 use chacha20poly1305::{aead::{Aead, KeyInit}, ChaCha20Poly1305, Key, Nonce};
@@ -38,10 +38,15 @@ const CONNECTION_CODE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Default)]
 pub struct MessagingRuntimeState {
-    seen_envelopes: Arc<Mutex<HashMap<String, ()>>>,
+    seen_envelopes: Arc<Mutex<VecDeque<(String, u64)>>>,
+    failed_envelopes: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl MessagingRuntimeState { pub fn new() -> Self { Self::default() } }
+
+const SEEN_ENVELOPE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_SEEN_ENVELOPES: usize = 4096;
+const MAX_FAILED_DECRYPTS_PER_ENVELOPE: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredContact {
@@ -71,6 +76,10 @@ pub struct StoredContact {
     pub safety_number: String,
     #[serde(default = "default_trust_state")]
     pub trust_state: String,
+    #[serde(default)]
+    pub verified_at_ms: Option<u64>,
+    #[serde(default)]
+    pub local_route_id: Option<String>,
     pub created_at_ms: u64,
     pub last_read_at: Option<u64>,
 }
@@ -82,6 +91,8 @@ pub struct StoredMessage {
     pub mine: bool,
     pub text: String,
     pub timestamp: u64,
+    #[serde(default)]
+    pub received_at_ms: Option<u64>,
     pub status: String,
 }
 
@@ -93,7 +104,9 @@ pub struct MessagingStore {
     #[serde(default)] pub signal_sessions: HashMap<String, SignalSessionBlob>,
     #[serde(default)] pub local_kyber_prekey: Option<KyberPreKeyBlob>,
     #[serde(default)] pub local_profile: Option<LocalProfile>,
+    #[serde(default)] pub local_routes: Vec<LocalRoute>,
     #[serde(default)] pub used_opk_ids: Vec<u32>,
+    #[serde(default)] pub server_trust_roots: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +117,24 @@ pub struct LocalProfile {
     pub delivery_token: String,
     pub created_at_ms: u64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalRoute {
+    pub id: String,
+    pub mailbox_id: String,
+    pub receive_auth_token: String,
+    pub delivery_token: String,
+    pub server_url: String,
+    pub server_id: String,
+    pub scope: String,
+    #[serde(default = "default_true")]
+    pub active: bool,
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub expires_at_ms: Option<u64>,
+}
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalSessionBlob {
@@ -135,6 +166,8 @@ pub struct PendingInvite {
     pub code: String,
     pub mailbox_id: String,
     pub server_url: String,
+    #[serde(default)]
+    pub route_id: Option<String>,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
 }
@@ -145,6 +178,7 @@ pub struct ConnectionCodeResponse { pub id: String, pub code: String, pub create
 #[derive(Debug, Clone, Serialize)]
 pub struct MessagingSnapshot {
     pub my_recipient_id: String,
+    pub my_recipient_ids: Vec<String>,
     pub contacts: Vec<StoredContact>,
     pub messages: HashMap<String, Vec<StoredMessage>>,
 }
@@ -225,9 +259,8 @@ fn encode_signal_plaintext(
     sender_display_name: &str,
     message_id: &str,
     sent_at_ms: u64,
-    local_profile: &LocalProfile,
+    local_route: &LocalRoute,
     local_identity_public_b64: &str,
-    server_url: &str,
 ) -> Result<Vec<u8>, String> {
     serde_json::to_vec(&AxenoSignalPlaintext {
         v: 1,
@@ -236,9 +269,9 @@ fn encode_signal_plaintext(
         sent_at_ms,
         body: body.to_string(),
         sender_display_name: Some(sender_display_name.trim().to_string()).filter(|s| !s.is_empty()),
-        sender_mailbox_id: Some(local_profile.mailbox_id.clone()),
-        sender_delivery_token: Some(local_profile.delivery_token.clone()),
-        sender_server_url: Some(server_url.to_string()),
+        sender_mailbox_id: Some(local_route.mailbox_id.clone()),
+        sender_delivery_token: Some(local_route.delivery_token.clone()),
+        sender_server_url: Some(local_route.server_url.clone()),
         sender_device_id: Some(DEVICE_ID),
         sender_identity_public_b64: Some(local_identity_public_b64.to_string()),
     }).map_err(|e| format!("could not serialize encrypted message payload: {e}"))
@@ -342,9 +375,11 @@ fn load_store_with_key(app: &AppHandle, key_bytes: &[u8; 32]) -> Result<Messagin
     let data = fs::read(path).map_err(|e| format!("read encrypted message store failed: {e}"))?;
     let file = decode_store_file(&data)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key_bytes));
-    let plaintext = cipher.decrypt(Nonce::from_slice(&file.nonce), file.ciphertext.as_ref())
+    let mut plaintext = cipher.decrypt(Nonce::from_slice(&file.nonce), file.ciphertext.as_ref())
         .map_err(|_| "message store could not be decrypted; identity/password mismatch or corrupted store".to_string())?;
-    serde_json::from_slice(&plaintext).map_err(|e| format!("message store plaintext is corrupted: {e}"))
+    let parsed = serde_json::from_slice(&plaintext).map_err(|e| format!("message store plaintext is corrupted: {e}"));
+    plaintext.zeroize();
+    parsed
 }
 
 fn save_store_with_key(app: &AppHandle, store: &MessagingStore, key_bytes: &[u8; 32]) -> Result<(), String> {
@@ -357,10 +392,11 @@ fn save_store_with_key(app: &AppHandle, store: &MessagingStore, key_bytes: &[u8;
         path.file_name().and_then(|n| n.to_str()).unwrap_or(STORE_FILE),
         Uuid::new_v4()
     ));
-    let json = serde_json::to_vec(store).map_err(|e| format!("serialize message store failed: {e}"))?;
+    let mut json = serde_json::to_vec(store).map_err(|e| format!("serialize message store failed: {e}"))?;
     let mut nonce = [0u8; 12]; fill_random(&mut nonce)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key_bytes));
     let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce), json.as_ref()).map_err(|_| "message store encryption failed".to_string())?;
+    json.zeroize();
     let encoded = serde_json::to_vec(&EncryptedStoreFile { nonce, ciphertext }).map_err(|e| format!("serialize encrypted message store failed: {e}"))?;
     #[cfg(unix)] {
         use std::os::unix::fs::OpenOptionsExt;
@@ -413,9 +449,85 @@ fn ensure_local_profile(store: &mut MessagingStore) -> Result<LocalProfile, Stri
     Ok(profile)
 }
 
+fn new_local_route(server_url: String, scope: String, expires_at_ms: Option<u64>) -> Result<LocalRoute, String> {
+    let normalized = normalize_server_url(Some(server_url));
+    Ok(LocalRoute {
+        id: random_token("rt_", 18)?,
+        mailbox_id: random_token("mbx_", 24)?,
+        receive_auth_token: random_token("rx_", 32)?,
+        delivery_token: random_token("dt_", 32)?,
+        server_id: server_id_for_url(&normalized),
+        server_url: normalized,
+        scope,
+        active: true,
+        created_at_ms: now_ms(),
+        expires_at_ms,
+    })
+}
+
+fn route_connection_id(route: &LocalRoute) -> String {
+    format!("{}__{}", route.server_id, route.mailbox_id)
+}
+
+fn cleanup_expired_routes(store: &mut MessagingStore) {
+    let now = now_ms();
+    store.pending_invites.retain(|p| p.expires_at_ms > now);
+    store.local_routes.retain(|r| r.active && r.expires_at_ms.map(|exp| exp > now).unwrap_or(true));
+}
+
+fn ensure_route_for_contact(store: &mut MessagingStore, contact_id: &str, server_url: &str) -> Result<LocalRoute, String> {
+    cleanup_expired_routes(store);
+    if let Some(existing_route_id) = store.contacts.iter().find(|c| c.id == contact_id).and_then(|c| c.local_route_id.clone()) {
+        if let Some(route) = store.local_routes.iter_mut().find(|r| r.id == existing_route_id) {
+            route.server_url = normalize_server_url(Some(server_url.to_string()));
+            route.server_id = server_id_for_url(&route.server_url);
+            route.expires_at_ms = None;
+            route.active = true;
+            return Ok(route.clone());
+        }
+    }
+    let route = new_local_route(server_url.to_string(), format!("contact:{contact_id}"), None)?;
+    let route_id = route.id.clone();
+    store.local_routes.push(route.clone());
+    if let Some(contact) = store.contacts.iter_mut().find(|c| c.id == contact_id) {
+        contact.local_route_id = Some(route_id);
+    }
+    Ok(route)
+}
+
+fn route_for_mailbox(store: &MessagingStore, mailbox_id: &str) -> Option<LocalRoute> {
+    store.local_routes.iter().find(|r| r.active && r.mailbox_id == mailbox_id).cloned()
+}
+
+fn legacy_route_from_profile(profile: LocalProfile, server_id: String, server_url: String) -> LocalRoute {
+    LocalRoute {
+        id: "legacy_local_profile".to_string(),
+        mailbox_id: profile.mailbox_id,
+        receive_auth_token: profile.receive_auth_token,
+        delivery_token: profile.delivery_token,
+        server_url: normalize_server_url(Some(server_url)),
+        server_id,
+        scope: "legacy".to_string(),
+        active: true,
+        created_at_ms: profile.created_at_ms,
+        expires_at_ms: None,
+    }
+}
+
 fn token_hash(token: &str) -> String { hex::encode(Sha256::digest(token.as_bytes())) }
 
-fn safety_number(identity_public: &[u8]) -> String { hex::encode(&Sha256::digest(identity_public)[..16]) }
+fn pairwise_safety_number(local_identity_public: &[u8], remote_identity_public: &[u8]) -> String {
+    let (first, second) = if local_identity_public <= remote_identity_public {
+        (local_identity_public, remote_identity_public)
+    } else {
+        (remote_identity_public, local_identity_public)
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"axeno-safety-number-v1");
+    hasher.update(first);
+    hasher.update(second);
+    hex::encode(&hasher.finalize()[..16])
+}
 
 fn default_trust_state() -> String { "unverified".to_string() }
 
@@ -436,15 +548,20 @@ fn normalize_server_url(url: Option<String>) -> String {
 }
 pub fn server_id_for_url(url: &str) -> String { format!("srv_{}", hex::encode(&Sha256::digest(url.as_bytes())[..8])) }
 
-fn contact_from_payload(payload: InvitePayload) -> Result<StoredContact, String> {
+fn contact_from_payload(payload: InvitePayload, local_identity_public: &[u8]) -> Result<StoredContact, String> {
     if payload.v != 1 || payload.protocol != PROTOCOL_SIGNAL { return Err("unsupported connection code protocol".into()); }
+    let now = now_ms();
+    if payload.created_at_ms.saturating_add(CONNECTION_CODE_TTL_MS) < now {
+        return Err("connection code has expired; ask for a fresh code".into());
+    }
+    let server_url = normalize_server_url(Some(payload.server_url.clone()));
     let identity_public = STANDARD_NO_PAD.decode(payload.identity_public_b64.as_bytes()).map_err(|_| "bad identity public key in code".to_string())?;
     Ok(StoredContact {
         id: payload.mailbox_id.clone(),
         display_name: Some(payload.display_name.clone()).filter(|s| !s.trim().is_empty()),
         recipient_id: payload.mailbox_id.clone(),
-        server_url: payload.server_url.clone(),
-        server_id: server_id_for_url(&payload.server_url),
+        server_url: server_url.clone(),
+        server_id: server_id_for_url(&server_url),
         identity_public_b64: payload.identity_public_b64,
         registration_id: payload.registration_id,
         device_id: payload.device_id,
@@ -457,8 +574,10 @@ fn contact_from_payload(payload: InvitePayload) -> Result<StoredContact, String>
         kyber_prekey_public_b64: payload.kyber_prekey_public_b64,
         kyber_prekey_signature_b64: payload.kyber_prekey_signature_b64,
         delivery_token: payload.delivery_token,
-        safety_number: safety_number(&identity_public),
+        safety_number: pairwise_safety_number(local_identity_public, &identity_public),
         trust_state: "unverified".to_string(),
+        verified_at_ms: None,
+        local_route_id: None,
         created_at_ms: now_ms(),
         last_read_at: None,
     })
@@ -469,43 +588,57 @@ pub async fn generate_connection_code(app: AppHandle, session: &AppSessionState,
     let blob = load_vault(&app)?;
     let material = signal_material(session).await?;
     let mut store = load_store_with_key(&app, &store_key)?;
-    let profile = ensure_local_profile(&mut store)?;
+    cleanup_expired_routes(&mut store);
 
-    // Reserve a fresh one-time prekey per generated invite where possible.
+    // Reserve a fresh one-time prekey per generated invite. Do not silently fall
+    // back to reusing OPKs: that breaks the one-time property and makes stale
+    // connection codes much more dangerous.
     let opk = blob.opks_public
         .iter()
         .find(|o| !store.used_opk_ids.contains(&o.id))
         .cloned()
-        .or_else(|| blob.opks_public.first().cloned());
-    if let Some(ref opk) = opk {
-        if !store.used_opk_ids.contains(&opk.id) { store.used_opk_ids.push(opk.id); }
-    }
+        .ok_or_else(|| "no unused one-time prekeys remain; rotate/regenerate prekeys before creating more codes".to_string())?;
+    store.used_opk_ids.push(opk.id);
 
-    let kyber = signal_protocol_engine::ensure_local_kyber_prekey(&blob, &material, &mut store)?;
     let created = now_ms();
+    let expires = created.saturating_add(CONNECTION_CODE_TTL_MS);
+    let route = new_local_route(
+        normalize_server_url(server_url),
+        "pending_invite".to_string(),
+        Some(expires),
+    )?;
+    let kyber = signal_protocol_engine::ensure_local_kyber_prekey(&blob, &material, &mut store)?;
     let payload = InvitePayload {
         v: 1,
         protocol: PROTOCOL_SIGNAL.to_string(),
         display_name: material.display_name.trim().to_string(),
-        mailbox_id: profile.mailbox_id.clone(),
-        delivery_token: profile.delivery_token.clone(),
-        server_url: normalize_server_url(server_url),
+        mailbox_id: route.mailbox_id.clone(),
+        delivery_token: route.delivery_token.clone(),
+        server_url: route.server_url.clone(),
         device_id: DEVICE_ID,
         identity_public_b64: STANDARD_NO_PAD.encode(&blob.public_key),
         registration_id: blob.registration_id as u32,
         signed_prekey_id: blob.signed_prekey_id,
         signed_prekey_public_b64: STANDARD_NO_PAD.encode(&blob.signed_prekey_public),
         signed_prekey_signature_b64: STANDARD_NO_PAD.encode(&blob.signed_prekey_signature),
-        opk_id: opk.as_ref().map(|o| o.id),
-        opk_public_b64: opk.as_ref().map(|o| STANDARD_NO_PAD.encode(&o.public_key)),
+        opk_id: Some(opk.id),
+        opk_public_b64: Some(STANDARD_NO_PAD.encode(&opk.public_key)),
         kyber_prekey_id: Some(kyber.id),
         kyber_prekey_public_b64: Some(kyber.public_b64.clone()),
         kyber_prekey_signature_b64: Some(kyber.signature_b64.clone()),
         created_at_ms: created,
     };
     let code = payload_to_code(&payload)?;
-    let pending = PendingInvite { id: Uuid::new_v4().to_string(), code: code.clone(), mailbox_id: payload.mailbox_id.clone(), server_url: payload.server_url.clone(), created_at_ms: payload.created_at_ms, expires_at_ms: payload.created_at_ms + CONNECTION_CODE_TTL_MS };
-    store.pending_invites.retain(|p| p.expires_at_ms > created);
+    let pending = PendingInvite {
+        id: Uuid::new_v4().to_string(),
+        code: code.clone(),
+        mailbox_id: route.mailbox_id.clone(),
+        server_url: route.server_url.clone(),
+        route_id: Some(route.id.clone()),
+        created_at_ms: payload.created_at_ms,
+        expires_at_ms: expires,
+    };
+    store.local_routes.push(route);
     store.pending_invites.push(pending.clone());
     save_store_with_key(&app, &store, &store_key)?;
     Ok(ConnectionCodeResponse { id: pending.id, code, created_at: pending.created_at_ms })
@@ -514,30 +647,54 @@ pub async fn generate_connection_code(app: AppHandle, session: &AppSessionState,
 pub async fn list_connection_codes(app: AppHandle, session: &AppSessionState) -> Result<Vec<ConnectionCodeResponse>, String> {
     let store_key = store_key(session).await?;
     let mut store = load_store_with_key(&app, &store_key)?;
-    let now = now_ms();
-    store.pending_invites.retain(|p| p.expires_at_ms > now);
+    cleanup_expired_routes(&mut store);
     let out = store.pending_invites.iter().cloned().map(|p| ConnectionCodeResponse { id: p.id, code: p.code, created_at: p.created_at_ms }).collect();
     save_store_with_key(&app, &store, &store_key)?;
     Ok(out)
 }
 
-pub async fn delete_connection_code(app: AppHandle, session: &AppSessionState, id: String) -> Result<(), String> {
+pub async fn delete_connection_code(app: AppHandle, session: &AppSessionState, id: String) -> Result<Vec<String>, String> {
     let store_key = store_key(session).await?;
     let mut store = load_store_with_key(&app, &store_key)?;
+    let route_ids: Vec<String> = store.pending_invites
+        .iter()
+        .filter(|p| p.id == id)
+        .filter_map(|p| p.route_id.clone())
+        .collect();
+    let connection_ids: Vec<String> = store.local_routes
+        .iter()
+        .filter(|r| route_ids.iter().any(|rid| rid == &r.id))
+        .map(route_connection_id)
+        .collect();
     store.pending_invites.retain(|p| p.id != id);
-    save_store_with_key(&app, &store, &store_key)
+    for route in &mut store.local_routes {
+        if route_ids.iter().any(|rid| rid == &route.id) {
+            route.active = false;
+            route.expires_at_ms = Some(now_ms());
+        }
+    }
+    cleanup_expired_routes(&mut store);
+    save_store_with_key(&app, &store, &store_key)?;
+    Ok(connection_ids)
 }
 
 pub async fn add_contact_from_code(app: AppHandle, session: &AppSessionState, code: String) -> Result<StoredContact, String> {
     let store_key = store_key(session).await?;
-    let contact = contact_from_payload(code_to_payload(&code)?)?;
+    let blob = load_vault(&app)?;
+    let contact = contact_from_payload(code_to_payload(&code)?, &blob.public_key)?;
     let mut store = load_store_with_key(&app, &store_key)?;
-    if let Some(existing) = store.contacts.iter_mut().find(|c| c.recipient_id == contact.recipient_id) {
-        if existing.identity_public_b64 != contact.identity_public_b64 && !existing.identity_public_b64.is_empty() {
-            existing.trust_state = "identity_changed_blocked".to_string();
+    cleanup_expired_routes(&mut store);
+
+    if let Some(pos) = store.contacts.iter().position(|c| c.recipient_id == contact.recipient_id) {
+        if store.contacts[pos].identity_public_b64 != contact.identity_public_b64 && !store.contacts[pos].identity_public_b64.is_empty() {
+            store.contacts[pos].trust_state = "identity_changed_blocked".to_string();
+            store.contacts[pos].verified_at_ms = None;
             save_store_with_key(&app, &store, &store_key)?;
             return Err("contact identity key changed; refusing to replace it automatically. Verify out-of-band before re-adding.".into());
         }
+        let contact_id = store.contacts[pos].id.clone();
+        let route = ensure_route_for_contact(&mut store, &contact_id, &contact.server_url)?;
+        let existing = &mut store.contacts[pos];
         existing.display_name = contact.display_name.clone().or_else(|| existing.display_name.clone());
         existing.server_url = contact.server_url.clone();
         existing.server_id = contact.server_id.clone();
@@ -554,46 +711,59 @@ pub async fn add_contact_from_code(app: AppHandle, session: &AppSessionState, co
         existing.kyber_prekey_signature_b64 = contact.kyber_prekey_signature_b64.clone();
         existing.delivery_token = contact.delivery_token.clone();
         existing.safety_number = contact.safety_number.clone();
+        existing.local_route_id = Some(route.id.clone());
         let updated = existing.clone();
         save_store_with_key(&app, &store, &store_key)?;
         return Ok(updated);
     }
+
     store.contacts.push(contact.clone());
+    let route = ensure_route_for_contact(&mut store, &contact.id, &contact.server_url)?;
+    if let Some(stored) = store.contacts.iter_mut().find(|c| c.id == contact.id) {
+        stored.local_route_id = Some(route.id.clone());
+    }
+    let stored = store.contacts.iter().find(|c| c.id == contact.id).cloned().unwrap_or(contact);
     save_store_with_key(&app, &store, &store_key)?;
-    Ok(contact)
+    Ok(stored)
 }
 
 pub async fn snapshot(app: AppHandle, session: &AppSessionState) -> Result<MessagingSnapshot, String> {
     let store_key = store_key(session).await?;
     let mut store = load_store_with_key(&app, &store_key)?;
-    let profile = ensure_local_profile(&mut store)?;
+    cleanup_expired_routes(&mut store);
     let mut grouped: HashMap<String, Vec<StoredMessage>> = HashMap::new();
     for msg in store.messages.clone() { grouped.entry(msg.contact_id.clone()).or_default().push(msg); }
-    for msgs in grouped.values_mut() { msgs.sort_by_key(|m| m.timestamp); }
+    for msgs in grouped.values_mut() { msgs.sort_by_key(|m| (m.timestamp, m.received_at_ms.unwrap_or(m.timestamp))); }
+    let my_recipient_ids: Vec<String> = store.local_routes.iter().filter(|r| r.active).map(|r| r.mailbox_id.clone()).collect();
+    let my_recipient_id = my_recipient_ids.first().cloned().or_else(|| store.local_profile.as_ref().map(|p| p.mailbox_id.clone())).unwrap_or_default();
     save_store_with_key(&app, &store, &store_key)?;
-    Ok(MessagingSnapshot { my_recipient_id: profile.mailbox_id, contacts: store.contacts, messages: grouped })
+    Ok(MessagingSnapshot { my_recipient_id, my_recipient_ids, contacts: store.contacts, messages: grouped })
 }
 
 pub async fn connect_all(app: AppHandle, session: &AppSessionState, transport_state: State<'_, transport::TransportState>, tor_client: Arc<Mutex<Option<arti_client::TorClient<tor_rtcompat::PreferredRuntime>>>>) -> Result<(), String> {
     let store_key = store_key(session).await?;
     let mut store = load_store_with_key(&app, &store_key)?;
-    let profile = ensure_local_profile(&mut store)?;
-    let mut urls: Vec<String> = store.contacts.iter().map(|c| c.server_url.clone()).collect();
-    urls.extend(store.pending_invites.iter().filter(|p| p.expires_at_ms > now_ms()).map(|p| p.server_url.clone()));
-    if urls.is_empty() { urls.push(DEFAULT_DEV_SERVER.to_string()); }
-    urls.sort(); urls.dedup();
+    cleanup_expired_routes(&mut store);
+
+    // Make sure every imported contact has a private return mailbox on that
+    // contact's relay. This avoids one global mailbox linking all contacts.
+    let contact_routes: Vec<(String, String)> = store.contacts.iter().map(|c| (c.id.clone(), c.server_url.clone())).collect();
+    for (contact_id, server_url) in contact_routes {
+        let _ = ensure_route_for_contact(&mut store, &contact_id, &server_url)?;
+    }
+
+    let routes: Vec<LocalRoute> = store.local_routes.iter().filter(|r| r.active).cloned().collect();
     save_store_with_key(&app, &store, &store_key)?;
-    for url in urls {
-        let server_id = server_id_for_url(&url);
+    for route in routes {
         let _ = transport::connect_server(
             app.clone(),
             transport_state.clone(),
             tor_client.clone(),
-            server_id,
-            url,
-            profile.mailbox_id.clone(),
-            profile.receive_auth_token.clone(),
-            profile.delivery_token.clone(),
+            route_connection_id(&route),
+            route.server_url.clone(),
+            route.mailbox_id.clone(),
+            route.receive_auth_token.clone(),
+            route.delivery_token.clone(),
         ).await;
     }
     Ok(())
@@ -607,24 +777,25 @@ pub async fn send_text_message(app: AppHandle, session: &AppSessionState, transp
     let blob = load_vault(&app)?;
     let material = signal_material(session).await?;
     let mut store = load_store_with_key(&app, &store_key)?;
-    ensure_local_profile(&mut store)?;
+    cleanup_expired_routes(&mut store);
     let contact = store.contacts.iter().find(|c| c.id == contact_id).cloned().ok_or_else(|| "contact not found".to_string())?;
     if contact.trust_state == "identity_changed_blocked" { return Err("contact identity changed; verify before sending".into()); }
+    let route = ensure_route_for_contact(&mut store, &contact.id, &contact.server_url)?;
 
     let message_id = Uuid::new_v4().to_string();
     let sent_at = now_ms();
     let cert = transport::request_sender_certificate(
         transport_state.clone(),
-        contact.server_id.clone(),
-        ensure_local_profile(&mut store)?.mailbox_id.clone(),
+        route_connection_id(&route),
+        route.mailbox_id.clone(),
         DEVICE_ID,
         STANDARD_NO_PAD.encode(&blob.public_key),
     ).await?;
-    let encrypted = signal_protocol_engine::encrypt_for_contact(&blob, &material, &contact, &mut store, &trimmed, &message_id, sent_at, &cert).await?;
+    let encrypted = signal_protocol_engine::encrypt_for_contact(&blob, &material, &contact, &route, &mut store, &trimmed, &message_id, sent_at, &cert).await?;
     let wire = SealedSignalWireMessage { v: 1, sealed_sender_b64: STANDARD_NO_PAD.encode(encrypted.sealed_sender) };
-    transport::send_envelope(transport_state, contact.server_id.clone(), contact.recipient_id.clone(), contact.delivery_token.clone(), ENVELOPE_TYPE_SEALED_SIGNAL.to_string(), serde_json::to_string(&wire).map_err(|e| e.to_string())?).await?;
+    transport::send_envelope(transport_state, route_connection_id(&route), contact.recipient_id.clone(), contact.delivery_token.clone(), ENVELOPE_TYPE_SEALED_SIGNAL.to_string(), serde_json::to_string(&wire).map_err(|e| e.to_string())?).await?;
 
-    let msg = StoredMessage { id: message_id, contact_id: contact.id, mine: true, text: trimmed, timestamp: sent_at, status: "sent".to_string() };
+    let msg = StoredMessage { id: message_id, contact_id: contact.id, mine: true, text: trimmed, timestamp: sent_at, received_at_ms: None, status: "sent".to_string() };
     store.messages.push(msg.clone());
     save_store_with_key(&app, &store, &store_key)?;
     Ok(SendMessageResponse { message: msg })
@@ -633,50 +804,128 @@ pub async fn send_text_message(app: AppHandle, session: &AppSessionState, transp
 pub async fn handle_incoming_envelope(app: AppHandle, session: &AppSessionState, runtime: State<'_, MessagingRuntimeState>, transport_state: State<'_, transport::TransportState>, server_id: String, envelope: transport::StoredEnvelope) -> Result<(), String> {
     let store_key = store_key(session).await?;
     if envelope.envelope_type != ENVELOPE_TYPE_SEALED_SIGNAL && envelope.envelope_type != ENVELOPE_TYPE_SIGNAL { return Ok(()); }
+
+    let envelope_key = envelope.id.to_string();
     {
-        let seen = runtime.seen_envelopes.lock().await;
-        if seen.contains_key(&envelope.id.to_string()) { return Ok(()); }
+        let mut seen = runtime.seen_envelopes.lock().await;
+        let now = now_ms();
+        while let Some((_, ts)) = seen.front() {
+            if seen.len() <= MAX_SEEN_ENVELOPES && now.saturating_sub(*ts) <= SEEN_ENVELOPE_TTL_MS { break; }
+            seen.pop_front();
+        }
+        if seen.iter().any(|(id, _)| id == &envelope_key) { return Ok(()); }
+    }
+    {
+        let failed = runtime.failed_envelopes.lock().await;
+        if failed.get(&envelope_key).copied().unwrap_or(0) >= MAX_FAILED_DECRYPTS_PER_ENVELOPE {
+            return Ok(());
+        }
     }
 
     let blob = load_vault(&app)?;
     let material = signal_material(session).await?;
     let mut store = load_store_with_key(&app, &store_key)?;
+    cleanup_expired_routes(&mut store);
+    let local_route = route_for_mailbox(&store, &envelope.to)
+        .or_else(|| store.local_profile.clone().map(|p| legacy_route_from_profile(p, server_id.clone(), DEFAULT_DEV_SERVER.to_string())))
+        .ok_or_else(|| "incoming envelope was not addressed to a known local mailbox".to_string())?;
     let trust_root_b64 = transport::get_server_trust_root(transport_state, server_id.clone())
         .await?
         .ok_or_else(|| "server trust root unavailable; reconnect to the relay before decrypting sealed-sender messages".to_string())?;
+    if let Some(pinned) = store.server_trust_roots.get(&local_route.server_id) {
+        if pinned != &trust_root_b64 {
+            return Err("server trust root changed for this relay; refusing to decrypt until manually reviewed".into());
+        }
+    } else {
+        store.server_trust_roots.insert(local_route.server_id.clone(), trust_root_b64.clone());
+    }
     let wire: SealedSignalWireMessage = serde_json::from_str(&envelope.ciphertext).map_err(|e| format!("bad sealed Signal envelope: {e}"))?;
     if wire.v != 1 { return Err("unsupported sealed Signal envelope version".into()); }
     let ciphertext = STANDARD_NO_PAD.decode(wire.sealed_sender_b64.as_bytes()).map_err(|_| "bad sealed sender ciphertext encoding".to_string())?;
 
-    let decrypted = signal_protocol_engine::decrypt_sealed_sender_message(
+    let decrypted_result = signal_protocol_engine::decrypt_sealed_sender_message(
         &blob,
         &material,
         &mut store,
+        &local_route,
         &server_id,
         &trust_root_b64,
         &ciphertext,
-    ).await?;
+    ).await;
+
+    let decrypted = match decrypted_result {
+        Ok(value) => value,
+        Err(e) => {
+            let mut failed = runtime.failed_envelopes.lock().await;
+            let count = failed.entry(envelope_key.clone()).or_insert(0);
+            *count = count.saturating_add(1);
+            return Err(e);
+        }
+    };
 
     let contact_id = decrypted.contact.id.clone();
     if store.messages.iter().any(|m| m.id == decrypted.message.message_id) {
         save_store_with_key(&app, &store, &store_key)?;
-        runtime.seen_envelopes.lock().await.insert(envelope.id.to_string(), ());
+        runtime.seen_envelopes.lock().await.push_back((envelope_key, now_ms()));
         return Ok(());
     }
 
+    let received_at = now_ms();
     let msg = StoredMessage {
         id: decrypted.message.message_id,
         contact_id: contact_id.clone(),
         mine: false,
         text: decrypted.message.body,
         timestamp: decrypted.message.sent_at_ms,
+        received_at_ms: Some(received_at),
         status: "received".to_string(),
     };
     store.messages.push(msg.clone());
+
+    // If this was a one-off invite mailbox, promote it to a contact route once
+    // the first valid message lands, rather than keeping it as a reusable invite.
+    if let Some(route) = store.local_routes.iter_mut().find(|r| r.id == local_route.id) {
+        route.scope = format!("contact:{contact_id}");
+        route.expires_at_ms = None;
+    }
+    for invite in &mut store.pending_invites {
+        if invite.mailbox_id == local_route.mailbox_id { invite.expires_at_ms = received_at; }
+    }
+    cleanup_expired_routes(&mut store);
+
     save_store_with_key(&app, &store, &store_key)?;
-    runtime.seen_envelopes.lock().await.insert(envelope.id.to_string(), ());
+    runtime.seen_envelopes.lock().await.push_back((envelope_key.clone(), now_ms()));
+    runtime.failed_envelopes.lock().await.remove(&envelope_key);
     let _ = app.emit("axeno-message", IncomingMessageEvent { contact_id, message: msg });
     Ok(())
+}
+
+pub async fn mark_contact_verified(app: AppHandle, session: &AppSessionState, contact_id: String, verified: bool) -> Result<StoredContact, String> {
+    let store_key = store_key(session).await?;
+    let mut store = load_store_with_key(&app, &store_key)?;
+    let contact = store.contacts.iter_mut().find(|c| c.id == contact_id).ok_or_else(|| "contact not found".to_string())?;
+    if contact.trust_state == "identity_changed_blocked" && verified {
+        return Err("contact identity changed; re-add using a fresh code before verifying".into());
+    }
+    contact.trust_state = if verified { "verified" } else { "unverified" }.to_string();
+    contact.verified_at_ms = if verified { Some(now_ms()) } else { None };
+    let out = contact.clone();
+    save_store_with_key(&app, &store, &store_key)?;
+    Ok(out)
+}
+
+pub async fn update_contact_server(app: AppHandle, session: &AppSessionState, contact_id: String, server_url: String) -> Result<StoredContact, String> {
+    let store_key = store_key(session).await?;
+    let mut store = load_store_with_key(&app, &store_key)?;
+    let normalized = normalize_server_url(Some(server_url));
+    let route = ensure_route_for_contact(&mut store, &contact_id, &normalized)?;
+    let contact = store.contacts.iter_mut().find(|c| c.id == contact_id).ok_or_else(|| "contact not found".to_string())?;
+    contact.server_url = normalized.clone();
+    contact.server_id = server_id_for_url(&normalized);
+    contact.local_route_id = Some(route.id.clone());
+    let out = contact.clone();
+    save_store_with_key(&app, &store, &store_key)?;
+    Ok(out)
 }
 
 mod signal_protocol_engine {
@@ -910,6 +1159,7 @@ mod signal_protocol_engine {
         me: &EncryptedIdentity,
         material: &PrivateSignalMaterial,
         contact: &StoredContact,
+        local_route: &LocalRoute,
         axeno_store: &mut MessagingStore,
         plaintext: &str,
         message_id: &str,
@@ -919,8 +1169,7 @@ mod signal_protocol_engine {
         ensure_local_kyber_prekey(me, material, axeno_store)?;
         let mut protocol_store = protocol_store_for(me, material, axeno_store).await?;
         let remote = remote_address(contact)?;
-        let local_profile = ensure_local_profile(axeno_store)?;
-        let local = local_address(&local_profile.mailbox_id)?;
+        let local = local_address(&local_route.mailbox_id)?;
 
         let has_existing_session = protocol_store.session_store
             .load_session(&remote)
@@ -947,16 +1196,14 @@ mod signal_protocol_engine {
                 .map_err(|e| signal_err("Signal PreKeyBundle processing failed", e))?;
         }
 
-        let local_profile_for_payload = ensure_local_profile(axeno_store)?;
         let local_identity_public_b64 = STANDARD_NO_PAD.encode(&me.public_key);
         let plaintext_payload = encode_signal_plaintext(
             plaintext,
             &material.display_name,
             message_id,
             sent_at_ms,
-            &local_profile_for_payload,
+            local_route,
             &local_identity_public_b64,
-            &contact.server_url,
         )?;
         let mut rng = fresh_signal_rng()?;
         let cipher = message_encrypt(
@@ -1003,14 +1250,14 @@ mod signal_protocol_engine {
         me: &EncryptedIdentity,
         material: &PrivateSignalMaterial,
         axeno_store: &mut MessagingStore,
-        server_id: &str,
+        local_route: &LocalRoute,
+        _server_id: &str,
         trust_root_b64: &str,
         sealed_sender: &[u8],
     ) -> Result<DecryptedEnvelope, String> {
         ensure_local_kyber_prekey(me, material, axeno_store)?;
         let mut protocol_store = protocol_store_for(me, material, axeno_store).await?;
-        let local_profile = ensure_local_profile(axeno_store)?;
-        let local = local_address(&local_profile.mailbox_id)?;
+        let local = local_address(&local_route.mailbox_id)?;
 
         let trust_root_raw = decode_b64(trust_root_b64, "server trust root")?;
         let trust_root = PublicKey::deserialize(&trust_root_raw).map_err(|e| signal_err("bad server trust root", e))?;
@@ -1042,7 +1289,7 @@ mod signal_protocol_engine {
                 display_name: None,
                 recipient_id: cert_sender_uuid.clone(),
                 server_url: String::new(),
-                server_id: server_id.to_string(),
+                server_id: local_route.server_id.clone(),
                 identity_public_b64: cert_key_b64.clone(),
                 registration_id: 0,
                 device_id: cert_sender_device,
@@ -1055,8 +1302,10 @@ mod signal_protocol_engine {
                 kyber_prekey_public_b64: None,
                 kyber_prekey_signature_b64: None,
                 delivery_token: String::new(),
-                safety_number: safety_number(&cert_key.serialize()),
+                safety_number: pairwise_safety_number(&me.public_key, &cert_key.serialize()),
                 trust_state: "unverified".to_string(),
+                verified_at_ms: None,
+                local_route_id: Some(local_route.id.clone()),
                 created_at_ms: now_ms(),
                 last_read_at: None,
             }
@@ -1065,14 +1314,15 @@ mod signal_protocol_engine {
         if !contact.identity_public_b64.is_empty() && contact.identity_public_b64 != cert_key_b64 {
             if let Some(c) = axeno_store.contacts.iter_mut().find(|c| c.recipient_id == cert_sender_uuid) {
                 c.trust_state = "identity_changed_blocked".to_string();
+                c.verified_at_ms = None;
             }
             return Err("sealed sender certificate identity did not match stored contact identity".into());
         }
         contact.identity_public_b64 = cert_key_b64.clone();
         contact.device_id = cert_sender_device;
-        contact.server_id = server_id.to_string();
+        contact.server_id = local_route.server_id.clone();
         if contact.safety_number.is_empty() {
-            contact.safety_number = safety_number(&cert_key.serialize());
+            contact.safety_number = pairwise_safety_number(&me.public_key, &cert_key.serialize());
         }
 
         let remote = remote_address(&contact)?;
@@ -1085,7 +1335,7 @@ mod signal_protocol_engine {
                 let identity_b64 = STANDARD_NO_PAD.encode(prekey_msg.identity_key().serialize());
                 if contact.identity_public_b64.is_empty() {
                     contact.identity_public_b64 = identity_b64.clone();
-                    contact.safety_number = safety_number(&prekey_msg.identity_key().serialize());
+                    contact.safety_number = pairwise_safety_number(&me.public_key, &prekey_msg.identity_key().serialize());
                 }
                 let mut rng = fresh_signal_rng()?;
                 message_decrypt_prekey(
@@ -1147,8 +1397,10 @@ mod signal_protocol_engine {
             existing.device_id = contact.device_id;
             if !contact.delivery_token.is_empty() { existing.delivery_token = contact.delivery_token.clone(); }
             if existing.safety_number.is_empty() { existing.safety_number = contact.safety_number.clone(); }
+            existing.local_route_id = Some(local_route.id.clone());
             contact = existing.clone();
         } else {
+            contact.local_route_id = Some(local_route.id.clone());
             axeno_store.contacts.push(contact.clone());
         }
 

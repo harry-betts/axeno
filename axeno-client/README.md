@@ -1,7 +1,20 @@
-# Tauri + React + Typescript
+# Axeno client
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Tauri + React chat client using `libsignal-protocol` for 1:1 text sessions and sealed-sender envelopes.
 
-## Recommended IDE Setup
+## Privacy model
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+- Private identity keys are generated locally and stored in an encrypted vault.
+- Message history is encrypted at rest in the app data directory.
+- Connection codes carry public Signal prekey material plus a random mailbox and delivery token.
+- New connection codes use a fresh local routing mailbox and fresh one-time prekey; OPKs are not silently reused.
+- Imported contacts get a per-contact return mailbox instead of sharing one global mailbox across everyone.
+- Safety numbers are pairwise over both local and remote identity keys and verification is persisted.
+
+## Important limitations
+
+Axeno is not magic anonymity dust. The relay does not see plaintext, but it can still observe destination mailbox, delivery-token proof, ciphertext size, timing, and the authenticated receive mailbox for the socket used to submit a send. Per-contact return mailboxes reduce cross-contact correlation; they do not provide mixnet-level metadata protection.
+
+The built-in “local dev relay” is `ws://127.0.0.1:8787/ws` and is not anonymous. For real transport testing, add a self-hosted `.onion` relay.
+
+Identity transfer is disabled until there is a real implementation.

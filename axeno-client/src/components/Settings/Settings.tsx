@@ -255,8 +255,8 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
           {/* This header will now be styled as a bold sub-section */}
           <div className="inviteCodes-block-title">Connection Codes</div>
           <div className="inviteCodes-block-desc">
-            Share a code with someone so they can start a conversation with you.
-            Generate as many as you need and delete them whenever you like.
+            Share a single-use-ish code with someone so they can start a conversation with you.
+            Each code gets its own routing mailbox and expires after 24 hours; deleting it disables your local receive route.
           </div>
         </div>
 
@@ -376,12 +376,12 @@ function ServersSection({ settings, onChange }: { settings: AppSettings; onChang
   return (
     <Section
       title="Select default server"
-      description="Choose where messages addressed to you are stored. The official servers are operated by the Axeno project and route everything through Tor. Self-hosted servers give you full sovereignty over your message queues. Selecting a default server here will only apply to new chats. You may still change the server inside the server settings of each individual chat."
+      description="Choose where messages addressed to you are stored. This dev build has no real official relay configured; the built-in option is localhost only. For real use, add a self-hosted .onion WebSocket relay. Selecting a default server here only applies to new connection codes."
     >
       <div className="server-list">
         <ServerOption
-          name="Official servers"
-          description="Operated by the Axeno project · routed via Tor"
+          name="Local dev relay"
+          description="localhost only · not anonymous · development/testing"
           selected={settings.defaultServer.kind === "official"}
           onClick={() => setDefault({ kind: "official" })}
         />
@@ -489,7 +489,7 @@ function AboutSection({ torStatus, torError }: { torStatus: "connecting" | "conn
       <div className="about-block">
         <div className="about-row"><span>Version</span><span className="mono">0.1.0-dev</span></div>
         <div className="about-row"><span>Protocol</span><span>1:1 text uses libsignal-protocol sessions and official libsignal Sealed Sender envelopes.</span></div>
-        <div className="about-row"><span>Relay metadata</span><span>Server receives destination mailbox, delivery-token proof, ciphertext size, and timing only.</span></div>
+        <div className="about-row"><span>Relay metadata</span><span>The relay sees destination mailboxes, delivery-token proof, ciphertext size/timing, and the authenticated receive mailbox for the socket used to submit a send. Axeno now uses per-contact return mailboxes to reduce cross-contact linking, but it is not mixnet-level anonymous.</span></div>
         <div className="about-row"><span>Transport</span><span>Local WebSocket for development; .onion WebSocket through Tor for real relay use.</span></div>
         <div className="about-row"><span>Tor status</span><span>{torLabel}</span></div>
       </div>
