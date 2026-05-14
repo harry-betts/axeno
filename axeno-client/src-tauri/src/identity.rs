@@ -24,7 +24,28 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// On-disk format. Contains only public material plus encrypted secrets.
 /// Safe to back up; safe to copy. Cannot be decrypted without the passphrase.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Argon2ParamsOnDisk {
+    pub m_kib: u32,
+    pub t: u32,
+    pub p: u32,
+}
+
+fn default_identity_version() -> u16 { 1 }
+fn default_kdf_algorithm() -> String { "argon2id".to_string() }
+fn default_kdf_params() -> Argon2ParamsOnDisk {
+    Argon2ParamsOnDisk { m_kib: ARGON2_MEM_KIB, t: ARGON2_ITERATIONS, p: ARGON2_PARALLELISM }
+}
+fn default_spk_created_at_ms() -> u64 { 0 }
+fn default_opk_next_id() -> u32 { OPK_COUNT.saturating_add(1) }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EncryptedIdentity {
+    #[serde(default = "default_identity_version")]
+    pub version: u16,
+    #[serde(default = "default_kdf_algorithm")]
+    pub kdf_algorithm: String,
+    #[serde(default = "default_kdf_params")]
+    pub kdf_params: Argon2ParamsOnDisk,
     pub kdf_salt: [u8; 32],
     pub nonce: [u8; 12],
     pub ciphertext: Vec<u8>,
@@ -33,7 +54,13 @@ pub struct EncryptedIdentity {
     pub signed_prekey_id: u32,
     pub signed_prekey_public: Vec<u8>,
     pub signed_prekey_signature: Vec<u8>,
+    #[serde(default = "default_spk_created_at_ms")]
+    pub signed_prekey_created_at_ms: u64,
     pub opks_public: Vec<OpkPublic>,
+    #[serde(default)]
+    pub previous_signed_prekeys: Vec<SignedPreKeyPublic>,
+    #[serde(default = "default_opk_next_id")]
+    pub opk_next_id: u32,
 }
 
 // --- Inner secrets (encrypted) ---------------------------------------------
@@ -42,8 +69,12 @@ pub struct EncryptedIdentity {
 /// All sensitive byte buffers are wiped on drop.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VaultSecrets {
+    #[serde(default = "default_identity_version")]
+    pub version: u16,
     pub identity_priv: Vec<u8>,
     pub spk_priv: Vec<u8>,
+    #[serde(default)]
+    pub previous_spks_secret: Vec<SignedPreKeySecret>,
     pub opks_secret: Vec<OpkSecret>,
     pub display_name: String,
 }
@@ -52,6 +83,9 @@ impl Drop for VaultSecrets {
     fn drop(&mut self) {
         self.identity_priv.zeroize();
         self.spk_priv.zeroize();
+        for previous in self.previous_spks_secret.iter_mut() {
+            previous.private_key.zeroize();
+        }
         for opk in self.opks_secret.iter_mut() {
             opk.private_key.zeroize();
         }
@@ -63,6 +97,21 @@ impl Drop for VaultSecrets {
 pub struct OpkPublic {
     pub id: u32,
     pub public_key: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SignedPreKeyPublic {
+    pub id: u32,
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SignedPreKeySecret {
+    pub id: u32,
+    pub private_key: Vec<u8>,
+    pub created_at_ms: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -126,11 +175,21 @@ fn fresh_rng() -> Result<ChaCha20Rng, IdentityError> {
     Ok(ChaCha20Rng::from_seed(seed))
 }
 
-fn derive_key(passphrase: &str, salt: &[u8; 32]) -> Result<DerivedKey, IdentityError> {
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn derive_key_with_params(passphrase: &str, salt: &[u8; 32], params_on_disk: &Argon2ParamsOnDisk) -> Result<DerivedKey, IdentityError> {
+    if params_on_disk.m_kib < 19_456 || params_on_disk.t == 0 || params_on_disk.p == 0 {
+        return Err(IdentityError::Kdf("unsupported Argon2 parameters in vault".to_string()));
+    }
     let params = Params::new(
-        ARGON2_MEM_KIB,
-        ARGON2_ITERATIONS,
-        ARGON2_PARALLELISM,
+        params_on_disk.m_kib,
+        params_on_disk.t,
+        params_on_disk.p,
         Some(KEY_LEN),
     )
     .map_err(|e| IdentityError::Kdf(e.to_string()))?;
@@ -141,6 +200,14 @@ fn derive_key(passphrase: &str, salt: &[u8; 32]) -> Result<DerivedKey, IdentityE
         .map_err(|e| IdentityError::Kdf(e.to_string()))?;
 
     Ok(DerivedKey(out))
+}
+
+fn derive_key(passphrase: &str, salt: &[u8; 32]) -> Result<DerivedKey, IdentityError> {
+    derive_key_with_params(passphrase, salt, &default_kdf_params())
+}
+
+impl DerivedKey {
+    pub(crate) fn expose_for_rekey(&self) -> [u8; 32] { self.0 }
 }
 
 fn encrypt_vault(
@@ -175,6 +242,12 @@ fn verify_unlocked_consistency(blob: &EncryptedIdentity, secrets: &VaultSecrets)
     PrivateKey::deserialize(&secrets.identity_priv).map_err(|e| IdentityError::Signal(e.to_string()))?;
     KeyPair::from_public_and_private(&blob.signed_prekey_public, &secrets.spk_priv)
         .map_err(|e| IdentityError::Signal(e.to_string()))?;
+    for previous in &blob.previous_signed_prekeys {
+        let secret = secrets.previous_spks_secret.iter().find(|s| s.id == previous.id)
+            .ok_or_else(|| IdentityError::Signal(format!("missing private previous signed prekey {}", previous.id)))?;
+        KeyPair::from_public_and_private(&previous.public_key, &secret.private_key)
+            .map_err(|e| IdentityError::Signal(e.to_string()))?;
+    }
 
     for public in &blob.opks_public {
         let secret = secrets.opks_secret.iter().find(|s| s.id == public.id)
@@ -212,10 +285,14 @@ pub fn create_identity(
     let identity_pub_bytes = identity_keypair.public_key().serialize().to_vec();
     let identity_priv_bytes = identity_keypair.private_key().serialize().to_vec();
 
-    // 2. Registration ID (1..=16380, per Signal spec)
-    let mut b2 = [0u8; 2];
-    fill_random(&mut b2)?;
-    let registration_id = (u16::from_le_bytes(b2) % MAX_REGISTRATION_ID) + 1;
+    // 2. Registration ID (1..=16380, per Signal spec), sampled without modulo bias.
+    let registration_id = loop {
+        let mut b2 = [0u8; 2];
+        fill_random(&mut b2)?;
+        let v = u16::from_le_bytes(b2);
+        let limit = MAX_REGISTRATION_ID * (u16::MAX / MAX_REGISTRATION_ID);
+        if v < limit { break (v % MAX_REGISTRATION_ID) + 1; }
+    };
 
     // 3. Signed PreKey
     let mut b4 = [0u8; 4];
@@ -249,8 +326,10 @@ pub fn create_identity(
 
     // 5. Bundle secrets
     let secrets = VaultSecrets {
+        version: 1,
         identity_priv: identity_priv_bytes,
         spk_priv: spk_priv_bytes,
+        previous_spks_secret: Vec::new(),
         opks_secret,
         display_name: display_name.to_string(),
     };
@@ -266,6 +345,9 @@ pub fn create_identity(
     vault_bytes.zeroize();
 
     let blob = EncryptedIdentity {
+        version: 1,
+        kdf_algorithm: "argon2id".to_string(),
+        kdf_params: default_kdf_params(),
         kdf_salt: salt,
         nonce,
         ciphertext,
@@ -274,7 +356,10 @@ pub fn create_identity(
         signed_prekey_id,
         signed_prekey_public: spk_pub_bytes,
         signed_prekey_signature: spk_signature,
+        signed_prekey_created_at_ms: current_time_ms(),
         opks_public,
+        previous_signed_prekeys: Vec::new(),
+        opk_next_id: OPK_COUNT.saturating_add(1),
     };
 
     Ok(CreatedIdentity {
@@ -297,7 +382,9 @@ pub fn unlock_identity(
     blob: &EncryptedIdentity,
     passphrase: &str,
 ) -> Result<UnlockedIdentity, IdentityError> {
-    let key = derive_key(passphrase, &blob.kdf_salt)?;
+    if blob.version > 1 { return Err(IdentityError::Serde("vault was written by a newer Axeno client".to_string())); }
+    if blob.kdf_algorithm != "argon2id" { return Err(IdentityError::Kdf("unsupported vault KDF".to_string())); }
+    let key = derive_key_with_params(passphrase, &blob.kdf_salt, &blob.kdf_params)?;
     let mut plaintext = decrypt_vault(&key, &blob.nonce, &blob.ciphertext)?;
     let secrets: VaultSecrets = serde_json::from_slice(&plaintext)
         .map_err(|e| IdentityError::Serde(e.to_string()))?;
@@ -331,16 +418,100 @@ pub fn change_passphrase(
 ) -> Result<DerivedKey, IdentityError> {
     let mut new_salt = [0u8; 32];
     fill_random(&mut new_salt)?;
-    let new_key = derive_key(new_passphrase, &new_salt)?;
+    let new_params = default_kdf_params();
+    let new_key = derive_key_with_params(new_passphrase, &new_salt, &new_params)?;
 
     let mut bytes = serde_json::to_vec(secrets).map_err(|e| IdentityError::Serde(e.to_string()))?;
     let (ciphertext, nonce) = encrypt_vault(&new_key, &bytes)?;
     bytes.zeroize();
 
+    blob.version = 1;
+    blob.kdf_algorithm = "argon2id".to_string();
+    blob.kdf_params = new_params;
     blob.kdf_salt = new_salt;
     blob.nonce = nonce;
     blob.ciphertext = ciphertext;
     Ok(new_key)
+}
+
+
+/// Remove OPKs that libsignal consumed during a successful PreKey decrypt, then
+/// replenish the pool so future connection codes never omit an OPK.
+pub fn remove_consumed_opks_and_replenish(
+    blob: &mut EncryptedIdentity,
+    secrets: &mut VaultSecrets,
+    consumed_ids: &[u32],
+) -> Result<(), IdentityError> {
+    if !consumed_ids.is_empty() {
+        blob.opks_public.retain(|p| !consumed_ids.contains(&p.id));
+        secrets.opks_secret.retain(|s| !consumed_ids.contains(&s.id));
+    }
+    replenish_opks(blob, secrets, 20, OPK_COUNT as usize)
+}
+
+pub fn replenish_opks(
+    blob: &mut EncryptedIdentity,
+    secrets: &mut VaultSecrets,
+    threshold: usize,
+    target: usize,
+) -> Result<(), IdentityError> {
+    if blob.opks_public.len() >= threshold && secrets.opks_secret.len() >= threshold { return Ok(()); }
+    let mut rng = fresh_rng()?;
+    let mut next_id = blob.opk_next_id.max(default_opk_next_id());
+    while blob.opks_public.len() < target {
+        while blob.opks_public.iter().any(|p| p.id == next_id) || secrets.opks_secret.iter().any(|s| s.id == next_id) {
+            next_id = next_id.saturating_add(1);
+        }
+        let pair = KeyPair::generate(&mut rng);
+        blob.opks_public.push(OpkPublic { id: next_id, public_key: pair.public_key.serialize().to_vec() });
+        secrets.opks_secret.push(OpkSecret { id: next_id, private_key: pair.private_key.serialize().to_vec() });
+        next_id = next_id.saturating_add(1);
+    }
+    blob.opk_next_id = next_id;
+    Ok(())
+}
+
+pub fn rotate_signed_prekey_if_due(
+    blob: &mut EncryptedIdentity,
+    secrets: &mut VaultSecrets,
+    max_age_ms: u64,
+) -> Result<bool, IdentityError> {
+    let now = current_time_ms();
+    if blob.signed_prekey_created_at_ms != 0 && now.saturating_sub(blob.signed_prekey_created_at_ms) < max_age_ms {
+        return Ok(false);
+    }
+    blob.previous_signed_prekeys.push(SignedPreKeyPublic {
+        id: blob.signed_prekey_id,
+        public_key: blob.signed_prekey_public.clone(),
+        signature: blob.signed_prekey_signature.clone(),
+        created_at_ms: blob.signed_prekey_created_at_ms,
+    });
+    secrets.previous_spks_secret.push(SignedPreKeySecret {
+        id: blob.signed_prekey_id,
+        private_key: secrets.spk_priv.clone(),
+        created_at_ms: blob.signed_prekey_created_at_ms,
+    });
+    let grace_ms = max_age_ms.saturating_mul(2);
+    blob.previous_signed_prekeys.retain(|p| now.saturating_sub(p.created_at_ms) <= grace_ms);
+    secrets.previous_spks_secret.retain(|p| now.saturating_sub(p.created_at_ms) <= grace_ms);
+
+    let mut rng = fresh_rng()?;
+    let mut b4 = [0u8; 4];
+    fill_random(&mut b4)?;
+    let signed_prekey_id = u32::from_le_bytes(b4) & SPK_ID_MASK;
+    let spk_pair = KeyPair::generate(&mut rng);
+    let identity_private = PrivateKey::deserialize(&secrets.identity_priv)
+        .map_err(|e| IdentityError::Signal(e.to_string()))?;
+    let spk_pub = spk_pair.public_key.serialize().to_vec();
+    let spk_sig = identity_private.calculate_signature(&spk_pub, &mut rng)
+        .map_err(|e| IdentityError::Signal(e.to_string()))?
+        .to_vec();
+    secrets.spk_priv = spk_pair.private_key.serialize().to_vec();
+    blob.signed_prekey_id = signed_prekey_id;
+    blob.signed_prekey_public = spk_pub;
+    blob.signed_prekey_signature = spk_sig;
+    blob.signed_prekey_created_at_ms = now;
+    Ok(true)
 }
 
 /// Hex-encoded fingerprint of the public identity key.

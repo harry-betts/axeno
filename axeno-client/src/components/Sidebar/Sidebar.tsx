@@ -34,7 +34,7 @@ export default function Sidebar({
 
   return (
     <aside className="sidebar">
-      <div className="sidebar-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div className="sidebar-header">
         <div className="brand">Axeno</div>
         
         {/* NEW TOR INDICATOR */}
@@ -56,7 +56,7 @@ export default function Sidebar({
           const last = lastMessage(msgs);
           const preview = last?.text ?? "";
           const time = last ? formatMessageTime(last.timestamp) : "";
-          const unread = unreadCount(msgs, c.lastReadAt);
+          const unread = isActive ? 0 : unreadCount(msgs, c.lastReadAt);
           return (
             <div
               key={c.id}

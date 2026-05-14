@@ -3,6 +3,8 @@ export interface InviteCode {
   code: string;
   createdAt: number;
   serverUrl: string;
+  serverName?: string;
+  reusable?: boolean;
 }
 
 export interface Contact {
@@ -24,6 +26,10 @@ export interface Message {
   mine: boolean;
   text: string;
   timestamp: number;
+  /** Local receiver-clock time for inbound messages. Used for unread logic so
+   * sender clock skew cannot keep a message unread forever.
+   */
+  receivedAtMs?: number | null;
   status?: string;
 }
 
@@ -118,6 +124,7 @@ export function messageFromBackend(m: BackendMessage): Message {
     mine: m.mine,
     text: m.text,
     timestamp: m.timestamp,
+    receivedAtMs: m.received_at_ms ?? null,
     status: m.status,
   };
 }

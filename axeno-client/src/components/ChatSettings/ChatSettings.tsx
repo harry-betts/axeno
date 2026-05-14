@@ -14,6 +14,17 @@ interface Props {
 }
 
 export default function ChatSettings({ contact, onClose, onOpenVerify, onMigrateRelay }: Props) {
+  const verifyStatusText = contact.trustState === "verified"
+    ? "Verified"
+    : contact.trustState === "identity_changed_blocked"
+      ? "Key changed"
+      : "Not verified";
+  const verifyStatusClass = contact.trustState === "verified"
+    ? "verified"
+    : contact.trustState === "identity_changed_blocked"
+      ? "blocked"
+      : "unverified";
+
   const [showMigration, setShowMigration] = useState(false);
   const [migrationCode, setMigrationCode] = useState("");
   const [migrationError, setMigrationError] = useState("");
@@ -56,7 +67,7 @@ export default function ChatSettings({ contact, onClose, onOpenVerify, onMigrate
             <button className="chat-settings-action" onClick={onOpenVerify}>
               <span className="chat-settings-action-icon"><IconShield /></span>
               <span className="chat-settings-action-label">Verify identity</span>
-              <span className="chat-settings-action-status">{contact.trustState === "verified" ? "Verified" : contact.trustState === "identity_changed_blocked" ? "Key changed" : "Not verified"}</span>
+              <span className={`chat-settings-action-status ${verifyStatusClass}`}>{verifyStatusText}</span>
               <span className="chat-settings-action-chevron"><IconChevronRight /></span>
             </button>
             <button className="chat-settings-action" onClick={() => setShowMigration(v => !v)}>

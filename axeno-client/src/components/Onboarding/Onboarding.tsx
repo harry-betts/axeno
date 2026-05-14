@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   IconCheck, IconKey, IconShield,
   IconLock, IconEye, IconEyeOff, IconUser,
@@ -20,8 +20,9 @@ type Step =
 
 export default function Onboarding({ onComplete }: Props) {
   const [step, setStep] = useState<Step>("welcome");
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
+  const passwordRef = useRef<HTMLInputElement>(null);
+  const confirmPasswordRef = useRef<HTMLInputElement>(null);
+  const [passwordReady, setPasswordReady] = useState(false);
   const [passwordError, setPasswordError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [displayName, setDisplayName] = useState("");
@@ -31,8 +32,10 @@ export default function Onboarding({ onComplete }: Props) {
   };
 
   const submitPassword = async () => {
-    if (password.length < 8) {
-      setPasswordError("Password must be at least 8 characters.");
+    const password = passwordRef.current?.value ?? "";
+    const confirmPassword = confirmPasswordRef.current?.value ?? "";
+    if (password.length < 12) {
+      setPasswordError("Password must be at least 12 characters. A 4-5 word passphrase is better.");
       return;
     }
     if (password !== confirmPassword) {
@@ -48,11 +51,15 @@ export default function Onboarding({ onComplete }: Props) {
         displayName,
       });
       // The backend now holds the unlocked session in Rust memory.
-      // Wipe React state copies of the password.
-      setPassword("");
-      setConfirmPassword("");
+      // Wipe DOM copies of the password immediately after IPC returns.
+      if (passwordRef.current) passwordRef.current.value = "";
+      if (confirmPasswordRef.current) confirmPasswordRef.current.value = "";
+      setPasswordReady(false);
       setStep("done");
     } catch (err) {
+      if (passwordRef.current) passwordRef.current.value = "";
+      if (confirmPasswordRef.current) confirmPasswordRef.current.value = "";
+      setPasswordReady(false);
       console.error("Failed to generate identity:", err);
       setPasswordError(
         typeof err === "string" ? err : "Encryption failed. Please try a different password."
@@ -71,8 +78,8 @@ export default function Onboarding({ onComplete }: Props) {
           <>
             <h1 className="onboarding-title">Private by design</h1>
             <p className="onboarding-text">
-              Your identity lives only on your device. No accounts, no servers,
-              no recovery codes held by anyone but you.
+              Your identity keys live only on your device. Relays can move encrypted messages,
+              but they should never receive your private keys, passphrase, contacts, or plaintext.
             </p>
 
             <div className="onboarding-points">
@@ -159,8 +166,8 @@ export default function Onboarding({ onComplete }: Props) {
                 type={showPassword ? "text" : "password"}
                 className="onboarding-key-input"
                 placeholder="Password"
-                value={password}
-                onChange={e => { setPassword(e.target.value); setPasswordError(""); }}
+                ref={passwordRef}
+                onChange={e => { setPasswordReady(e.currentTarget.value.length > 0 && (confirmPasswordRef.current?.value.length ?? 0) > 0); setPasswordError(""); }}
                 autoFocus
               />
               <button type="button" className="onboarding-eye-btn" onClick={() => setShowPassword(!showPassword)}>
@@ -172,13 +179,13 @@ export default function Onboarding({ onComplete }: Props) {
               type={showPassword ? "text" : "password"}
               className="onboarding-key-input"
               placeholder="Confirm password"
-              value={confirmPassword}
-              onChange={e => { setConfirmPassword(e.target.value); setPasswordError(""); }}
+              ref={confirmPasswordRef}
+              onChange={e => { setPasswordReady(e.currentTarget.value.length > 0 && (passwordRef.current?.value.length ?? 0) > 0); setPasswordError(""); }}
             />
 
             {passwordError && <div className="onboarding-error">{passwordError}</div>}
 
-            <button className="btn btn-primary onboarding-btn" onClick={submitPassword} disabled={!password || !confirmPassword}>
+            <button className="btn btn-primary onboarding-btn" onClick={submitPassword} disabled={!passwordReady}>
               Set password
             </button>
           </>

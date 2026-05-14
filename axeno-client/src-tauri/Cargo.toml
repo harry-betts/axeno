@@ -26,12 +26,12 @@ zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
 thiserror = "1"
 
-arti-client = { version = "0.41", features = ["tokio", "static"] }
+arti-client = { version = "0.41", features = ["tokio", "static", "onion-service-client"] }
 tor-rtcompat = { version = "0.41", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = "0.24"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 base64 = "0.22"

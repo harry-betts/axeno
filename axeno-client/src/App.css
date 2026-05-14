@@ -6,3 +6,23 @@
   overflow: hidden;
   color: var(--text-primary);
 }
+
+.app-centered {
+  align-items: center;
+  justify-content: center;
+}
+
+.app-loading-spinner {
+  border-color: var(--border);
+  border-top-color: var(--brand);
+}
+
+.login-form {
+  width: 100%;
+}
+
+.empty-chat {
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}

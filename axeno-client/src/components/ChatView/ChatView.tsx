@@ -13,6 +13,16 @@ interface Props {
   messageTextSize: "small" | "medium" | "large";
 }
 
+function messageStatusLabel(status?: string): string {
+  switch (status) {
+    case "relay_pending": return "sending";
+    case "relay_queued": return "queued";
+    case "relay_received": return "sent";
+    case "send_failed": return "failed";
+    default: return "";
+  }
+}
+
 export default function ChatView({ contact, messages, onOpenChatSettings, onSendMessage, sendOnEnter, messageTextSize }: Props) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -58,13 +68,15 @@ export default function ChatView({ contact, messages, onOpenChatSettings, onSend
           return (
             <div
               key={msg.id}
-              className={`message-row ${msg.mine ? "mine" : "theirs"}`}
-              style={{ marginTop: isSequenceStart && prev ? 10 : 0 }}
+              className={`message-row ${msg.mine ? "mine" : "theirs"} ${isSequenceStart && prev ? "sequence-start" : ""}`}
             >
               <div className={`bubble ${msg.mine ? "bubble-mine" : "bubble-theirs"} text-${messageTextSize}`}>
                 {msg.text}
               </div>
-              <div className="message-time">{formatMessageTime(msg.timestamp)}</div>
+              <div className="message-time">
+                {formatMessageTime(msg.timestamp)}
+                {msg.mine && messageStatusLabel(msg.status) && <span className={`message-status status-${msg.status}`}> · {messageStatusLabel(msg.status)}</span>}
+              </div>
             </div>
           );
         })}
@@ -89,7 +101,7 @@ export default function ChatView({ contact, messages, onOpenChatSettings, onSend
             <IconArrowUp />
           </button>
         </div>
-        {sendError && <div className="onboarding-error" style={{ marginTop: 8 }}>{sendError}</div>}
+        {sendError && <div className="onboarding-error chat-error">{sendError}</div>}
       </div>
     </main>
   );

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Axeno backend library: identity, vault, and Tor bootstrap.
 //!
 //! Security architecture summary:
@@ -17,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arti_client::{TorClient, TorClientConfig};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use tor_rtcompat::PreferredRuntime;
@@ -47,9 +48,89 @@ pub struct UnlockedSession {
     pub key: DerivedKey,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct AppSessionState {
     pub session: Arc<Mutex<Option<UnlockedSession>>>,
+    pub messaging_store_lock: Arc<Mutex<()>>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct UnifiedAppStateFile {
+    version: u16,
+    identity: Option<EncryptedIdentity>,
+    messages_store_json: Option<Vec<u8>>,
+}
+
+fn unified_state_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "could not resolve app data dir".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| format!("could not create app data dir: {e}"))?;
+    Ok(dir.join("axeno.state"))
+}
+
+fn load_unified_state(app: &AppHandle) -> Result<UnifiedAppStateFile, String> {
+    let path = unified_state_path(app)?;
+    if !path.exists() { return Ok(UnifiedAppStateFile { version: 1, ..Default::default() }); }
+    let raw = fs::read(&path).map_err(|e| format!("read unified state failed: {e}"))?;
+    let state: UnifiedAppStateFile = serde_json::from_slice(&raw).map_err(|e| format!("corrupted unified state: {e}"))?;
+    if state.version > 1 { return Err("unified state was written by a newer Axeno client".to_string()); }
+    Ok(state)
+}
+
+fn save_unified_state(app: &AppHandle, state: &UnifiedAppStateFile) -> Result<(), String> {
+    let path = unified_state_path(app)?;
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("axeno.state"),
+        uuid::Uuid::new_v4()
+    ));
+    let json = serde_json::to_vec(state).map_err(|e| format!("serialize unified state failed: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| format!("open unified state tmp failed: {e}"))?;
+        f.write_all(&json).map_err(|e| format!("write unified state failed: {e}"))?;
+        f.sync_all().map_err(|e| format!("fsync unified state failed: {e}"))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| format!("open unified state tmp failed: {e}"))?;
+        f.write_all(&json).map_err(|e| format!("write unified state failed: {e}"))?;
+        f.sync_all().map_err(|e| format!("fsync unified state failed: {e}"))?;
+    }
+    if let Err(e) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("rename unified state failed: {e}"));
+    }
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = fs::File::open(parent) { let _ = dir.sync_all(); }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn update_unified_message_store(app: &AppHandle, store_json: Vec<u8>) -> Result<(), String> {
+    let mut unified = load_unified_state(app).unwrap_or_else(|_| UnifiedAppStateFile { version: 1, ..Default::default() });
+    unified.version = 1;
+    unified.messages_store_json = Some(store_json);
+    save_unified_state(app, &unified)
+}
+
+pub(crate) fn read_unified_message_store(app: &AppHandle) -> Result<Option<Vec<u8>>, String> {
+    Ok(load_unified_state(app)?.messages_store_json)
 }
 
 // --------------------------------------------------------------------------
@@ -68,10 +149,15 @@ fn vault_path(app: &AppHandle) -> Result<PathBuf, String> {
 /// Atomically write a vault file with restrictive permissions.
 ///
 /// On Unix, the tmp file is opened with 0o600 from the start, so there is no
-/// window during which the file exists with default permissions.
-fn save_vault(app: &AppHandle, blob: &EncryptedIdentity) -> Result<(), String> {
+/// window during which the file exists with default permissions. The tmp file
+/// uses a unique UUID name and create_new to prevent symlink attacks.
+pub(crate) fn save_vault(app: &AppHandle, blob: &EncryptedIdentity) -> Result<(), String> {
     let path = vault_path(app)?;
-    let tmp = path.with_extension("vault.tmp");
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("identity.vault"),
+        uuid::Uuid::new_v4()
+    ));
 
     let json = serde_json::to_vec(blob).map_err(|e| format!("serialize error: {e}"))?;
 
@@ -80,8 +166,7 @@ fn save_vault(app: &AppHandle, blob: &EncryptedIdentity) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt;
         let mut f = fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&tmp)
             .map_err(|e| format!("open tmp failed: {e}"))?;
@@ -93,8 +178,7 @@ fn save_vault(app: &AppHandle, blob: &EncryptedIdentity) -> Result<(), String> {
     {
         let mut f = fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .open(&tmp)
             .map_err(|e| format!("open tmp failed: {e}"))?;
         f.write_all(&json)
@@ -102,7 +186,10 @@ fn save_vault(app: &AppHandle, blob: &EncryptedIdentity) -> Result<(), String> {
         f.sync_all().map_err(|e| format!("fsync failed: {e}"))?;
     }
 
-    fs::rename(&tmp, &path).map_err(|e| format!("atomic rename failed: {e}"))?;
+    if let Err(e) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("atomic rename failed: {e}"));
+    }
     #[cfg(unix)]
     {
         if let Some(parent) = path.parent() {
@@ -111,13 +198,25 @@ fn save_vault(app: &AppHandle, blob: &EncryptedIdentity) -> Result<(), String> {
             }
         }
     }
+    let mut unified = load_unified_state(app).unwrap_or_else(|_| UnifiedAppStateFile { version: 1, ..Default::default() });
+    unified.version = 1;
+    unified.identity = Some(blob.clone());
+    save_unified_state(app, &unified)?;
     Ok(())
 }
 
 pub(crate) fn load_vault(app: &AppHandle) -> Result<EncryptedIdentity, String> {
+    if let Ok(unified) = load_unified_state(app) {
+        if let Some(identity) = unified.identity { return Ok(identity); }
+    }
     let path = vault_path(app)?;
     let data = fs::read(&path).map_err(|_| "vault file not found".to_string())?;
-    serde_json::from_slice(&data).map_err(|_| "corrupted vault".to_string())
+    let blob: EncryptedIdentity = serde_json::from_slice(&data).map_err(|_| "corrupted vault".to_string())?;
+    let mut unified = load_unified_state(app).unwrap_or_else(|_| UnifiedAppStateFile { version: 1, ..Default::default() });
+    unified.version = 1;
+    unified.identity = Some(blob.clone());
+    let _ = save_unified_state(app, &unified);
+    Ok(blob)
 }
 
 // --------------------------------------------------------------------------
@@ -143,7 +242,10 @@ pub struct PublicIdentityResponse {
 
 #[tauri::command]
 async fn has_identity(app: AppHandle) -> Result<bool, String> {
-    Ok(vault_path(&app)?.exists())
+    if vault_path(&app)?.exists() { return Ok(true); }
+    Ok(load_unified_state(&app)
+        .map(|state| state.identity.is_some())
+        .unwrap_or(false))
 }
 
 /// Create a new identity. Persists the encrypted vault and caches the unlocked
@@ -249,13 +351,21 @@ async fn change_password(
     session: State<'_, AppSessionState>,
     new_passphrase: String,
 ) -> Result<(), String> {
+    let _store_guard = session.messaging_store_lock.lock().await;
     let mut blob = load_vault(&app)?;
     let mut guard = session.session.lock().await;
     let unlocked = guard.as_mut().ok_or_else(|| "vault is locked".to_string())?;
 
+    let old_key = unlocked.key.expose_for_rekey();
     let new_key =
         change_passphrase(&mut blob, &unlocked.secrets, &new_passphrase).map_err(|e| e.to_string())?;
     drop(new_passphrase);
+    let new_key_bytes = new_key.expose_for_rekey();
+
+    // Re-encrypt the message/contact store before committing the vault key change.
+    // Otherwise the vault unlocks with the new password but messages.store remains
+    // encrypted under the old derived store key.
+    messaging::reencrypt_message_store(&app, &old_key, &new_key_bytes)?;
 
     save_vault(&app, &blob)?;
     unlocked.key = new_key;
@@ -314,7 +424,7 @@ async fn transport_connect_server(
     auth_token: String,
     delivery_token: String,
 ) -> Result<(), String> {
-    transport::connect_server(app, state, tor.client.clone(), server_id, url, recipient_id, auth_token, delivery_token).await
+    transport::connect_server(app, state.inner(), tor.client.clone(), server_id, url, recipient_id, auth_token, delivery_token).await
 }
 
 #[tauri::command]
@@ -322,15 +432,7 @@ async fn transport_disconnect_server(
     state: State<'_, transport::TransportState>,
     server_id: String,
 ) -> Result<(), String> {
-    transport::disconnect_server(state, server_id).await
-}
-
-#[tauri::command]
-async fn transport_poll_server(
-    state: State<'_, transport::TransportState>,
-    server_id: String,
-) -> Result<(), String> {
-    transport::poll_server(state, server_id).await
+    transport::disconnect_server(state.inner(), server_id).await
 }
 
 #[tauri::command]
@@ -339,24 +441,46 @@ async fn transport_ack_envelopes(
     server_id: String,
     ids: Vec<uuid::Uuid>,
 ) -> Result<(), String> {
-    transport::ack_envelopes(state, server_id, ids).await
+    transport::ack_envelopes(state.inner(), server_id, ids).await
 }
 
 #[tauri::command]
 async fn transport_list_connections(
     state: State<'_, transport::TransportState>,
 ) -> Result<Vec<(String, String, String)>, String> {
-    transport::list_connections(state).await
+    transport::list_connections(state.inner()).await
 }
 
+
+
+#[tauri::command]
+async fn messaging_load_private_server_settings(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+) -> Result<messaging::PrivateServerSettings, String> {
+    messaging::load_private_server_settings(app, &session).await
+}
+
+#[tauri::command]
+async fn messaging_save_private_server_settings(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    settings: messaging::PrivateServerSettings,
+) -> Result<messaging::PrivateServerSettings, String> {
+    messaging::save_private_server_settings(app, &session, settings).await
+}
 
 #[tauri::command]
 async fn messaging_generate_connection_code(
     app: AppHandle,
     session: State<'_, AppSessionState>,
+    transport_state: State<'_, transport::TransportState>,
+    tor_state: State<'_, AppTorState>,
     server_url: Option<String>,
+    server_name: Option<String>,
+    reusable: bool,
 ) -> Result<messaging::ConnectionCodeResponse, String> {
-    messaging::generate_connection_code(app, &session, server_url).await
+    messaging::generate_connection_code(app, &session, transport_state.inner(), tor_state.client.clone(), server_url, server_name, reusable).await
 }
 
 #[tauri::command]
@@ -376,7 +500,7 @@ async fn messaging_delete_connection_code(
 ) -> Result<(), String> {
     let connection_ids = messaging::delete_connection_code(app, &session, id).await?;
     for connection_id in connection_ids {
-        let _ = transport::retire_mailbox(transport_state.clone(), connection_id).await;
+        let _ = transport::retire_mailbox(transport_state.inner(), connection_id).await;
     }
     Ok(())
 }
@@ -385,9 +509,10 @@ async fn messaging_delete_connection_code(
 async fn messaging_add_contact_from_code(
     app: AppHandle,
     session: State<'_, AppSessionState>,
+    tor_state: State<'_, AppTorState>,
     code: String,
 ) -> Result<messaging::StoredContact, String> {
-    messaging::add_contact_from_code(app, &session, code).await
+    messaging::add_contact_from_code(app, &session, tor_state.client.clone(), code).await
 }
 
 #[tauri::command]
@@ -405,29 +530,60 @@ async fn messaging_connect_all(
     transport_state: State<'_, transport::TransportState>,
     tor_state: State<'_, AppTorState>,
 ) -> Result<(), String> {
-    messaging::connect_all(app, &session, transport_state, tor_state.client.clone()).await
+    messaging::connect_all(app, &session, transport_state.inner(), tor_state.client.clone()).await
 }
 
 #[tauri::command]
-fn messaging_send_text_message(
+async fn messaging_send_text_message(
     app: AppHandle,
     session: State<'_, AppSessionState>,
     transport_state: State<'_, transport::TransportState>,
+    tor_state: State<'_, AppTorState>,
     contact_id: String,
     text: String,
 ) -> Result<messaging::SendMessageResponse, String> {
-    // libsignal's current Rust store futures are not Send, while async Tauri
-    // commands require Send futures because they are spawned onto the async
-    // runtime. Run this command synchronously and drive the async body on the
-    // current thread instead, so the non-Send libsignal futures never cross a
-    // thread boundary.
-    tauri::async_runtime::block_on(messaging::send_text_message(
-        app,
-        &session,
-        transport_state,
-        contact_id,
-        text,
-    ))
+    // libsignal's current Rust store futures are not Send. Do not block the
+    // Tauri/UI command thread with block_on; run the non-Send future on a
+    // dedicated current-thread runtime inside a blocking worker instead.
+    let session = session.inner().clone();
+    let transport_state = transport_state.inner().clone();
+    let tor_client = tor_state.client.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("could not start message worker runtime: {e}"))?
+            .block_on(messaging::send_text_message(
+                app,
+                &session,
+                &transport_state,
+                tor_client,
+                contact_id,
+                text,
+            ))
+    })
+    .await
+    .map_err(|e| format!("message worker panicked or was cancelled: {e}"))?
+}
+
+
+#[tauri::command]
+async fn messaging_mark_message_relay_received(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    message_id: String,
+    queued: bool,
+) -> Result<Option<messaging::StoredMessage>, String> {
+    messaging::mark_message_relay_received(app, &session, message_id, queued).await
+}
+
+#[tauri::command]
+async fn messaging_mark_message_send_failed(
+    app: AppHandle,
+    session: State<'_, AppSessionState>,
+    message_id: String,
+) -> Result<Option<messaging::StoredMessage>, String> {
+    messaging::mark_message_send_failed(app, &session, message_id).await
 }
 
 #[tauri::command]
@@ -473,10 +629,12 @@ async fn messaging_mark_contact_read(
 async fn messaging_migrate_contact_with_code(
     app: AppHandle,
     session: State<'_, AppSessionState>,
+    transport_state: State<'_, transport::TransportState>,
+    tor_state: State<'_, AppTorState>,
     contact_id: String,
     code: String,
 ) -> Result<messaging::StoredContact, String> {
-    messaging::migrate_contact_with_code(app, &session, contact_id, code).await
+    messaging::migrate_contact_with_code(app, &session, transport_state.inner(), tor_state.client.clone(), contact_id, code).await
 }
 
 #[tauri::command]
@@ -489,25 +647,42 @@ async fn messaging_update_contact_server(
     messaging::update_contact_server(app, &session, contact_id, server_url).await
 }
 
-#[tauri::command]
-fn messaging_handle_incoming_envelope(
+// This handler is no longer exposed as a Tauri command — envelope processing
+// now happens directly in the Rust transport layer (M2 security fix). Kept as
+// an internal helper for potential debugging use.
+#[allow(dead_code)]
+async fn messaging_handle_incoming_envelope(
     app: AppHandle,
     session: State<'_, AppSessionState>,
     runtime: State<'_, messaging::MessagingRuntimeState>,
     transport_state: State<'_, transport::TransportState>,
+    tor_state: State<'_, AppTorState>,
     server_id: String,
     envelope: transport::StoredEnvelope,
 ) -> Result<(), String> {
-    // See messaging_send_text_message: the libsignal decrypt path also contains
-    // non-Send store futures, so this command must not be an async Tauri command.
-    tauri::async_runtime::block_on(messaging::handle_incoming_envelope(
-        app,
-        &session,
-        runtime,
-        transport_state,
-        server_id,
-        envelope,
-    ))
+    // Same deal as send: sealed-sender decrypt uses non-Send libsignal futures,
+    // so isolate it on a worker thread instead of freezing the command loop.
+    let session = session.inner().clone();
+    let runtime = runtime.inner().clone();
+    let transport_state = transport_state.inner().clone();
+    let tor_client = tor_state.client.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("could not start message worker runtime: {e}"))?
+            .block_on(messaging::handle_incoming_envelope(
+                app,
+                &session,
+                &runtime,
+                &transport_state,
+                tor_client,
+                server_id,
+                envelope,
+            ))
+    })
+    .await
+    .map_err(|e| format!("message worker panicked or was cancelled: {e}"))?
 }
 
 // --------------------------------------------------------------------------
@@ -534,6 +709,8 @@ pub fn run() {
             update_display_name,
             change_password,
             bootstrap_tor,
+            messaging_load_private_server_settings,
+            messaging_save_private_server_settings,
             messaging_generate_connection_code,
             messaging_list_connection_codes,
             messaging_delete_connection_code,
@@ -541,7 +718,8 @@ pub fn run() {
             messaging_snapshot,
             messaging_connect_all,
             messaging_send_text_message,
-            messaging_handle_incoming_envelope,
+            messaging_mark_message_relay_received,
+            messaging_mark_message_send_failed,
             messaging_mark_contact_verified,
             messaging_verification_code_for_contact,
             messaging_verify_contact_with_code,
@@ -550,7 +728,6 @@ pub fn run() {
             messaging_update_contact_server,
             transport_connect_server,
             transport_disconnect_server,
-            transport_poll_server,
             transport_ack_envelopes,
             transport_list_connections,
         ])

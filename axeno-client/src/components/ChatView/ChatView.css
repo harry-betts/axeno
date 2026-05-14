@@ -218,3 +218,21 @@
 .bubble.text-large {
   font-size: 16px;
 }
+
+.message-row.sequence-start {
+  margin-top: 10px;
+}
+
+.chat-error {
+  margin-top: 8px;
+}
+
+
+.message-status {
+  opacity: 0.7;
+}
+
+.status-send_failed {
+  opacity: 1;
+  font-weight: 600;
+}

@@ -35,7 +35,15 @@ export function lastMessage(messages: Message[]): Message | undefined {
   return messages.reduce((a, b) => (a.timestamp > b.timestamp ? a : b));
 }
 
+function unreadComparisonTime(message: Message): number {
+  // Inbound message.timestamp is chosen by the sender. For unread state we need
+  // the local receiver clock, otherwise two localhost clients with slightly
+  // different clocks can leave a badge stuck forever after mark-as-read.
+  return message.receivedAtMs ?? message.timestamp;
+}
+
 export function unreadCount(messages: Message[], lastReadAt: number | null): number {
-  if (lastReadAt === null) return messages.filter(m => !m.mine).length;
-  return messages.filter(m => !m.mine && m.timestamp > lastReadAt).length;
+  const inbound = messages.filter(m => !m.mine);
+  if (lastReadAt === null) return inbound.length;
+  return inbound.filter(m => unreadComparisonTime(m) > lastReadAt).length;
 }

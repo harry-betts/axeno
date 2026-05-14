@@ -809,3 +809,7 @@
   color: var(--text-faint);
   font-family: var(--font-mono);
 }
+
+.settings-inline-error {
+  margin-top: 8px;
+}

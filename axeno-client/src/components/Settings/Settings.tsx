@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppSettings, InviteCode, PrivateServer, ServerChoice } from "../../types";
 import {
   IconArrowLeft, IconKey, IconServer, IconEye,
@@ -42,7 +42,7 @@ export default function Settings({
         </nav>
 
         <main className="settings-content">
-          {section === "identity" && <IdentitySection displayName={displayName} onChangeName={onChangeName} inviteCodes={settings.inviteCodes} onChangeInviteCodes={(inviteCodes) => onChange({ ...settings, inviteCodes })} defaultServerUrl={defaultServerUrl(settings)} />}
+          {section === "identity" && <IdentitySection displayName={displayName} onChangeName={onChangeName} inviteCodes={settings.inviteCodes} onChangeInviteCodes={(inviteCodes) => onChange({ ...settings, inviteCodes })} defaultServerUrl={defaultServerUrl(settings)} defaultServerName={defaultServerName(settings)} privateServers={settings.privateServers} />}
           {section === "servers" && <ServersSection settings={settings} onChange={onChange} />}
           {section === "appearance" && <AppearanceSection settings={settings} onChange={onChange} />}
           {section === "about" && <AboutSection torStatus={torStatus} torError={torError} />}
@@ -120,21 +120,46 @@ function compactConnectionCode(code: string): string {
   return `${code.slice(0, 18)}…${code.slice(-10)}`;
 }
 
+const LOCAL_DEV_RELAY_URL = "ws://127.0.0.1:8787/ws";
+
+function relayDisplayNameForUrl(serverUrl: string | undefined, privateServers: PrivateServer[]): string {
+  const normalized = (serverUrl || "").trim();
+  if (!normalized) return "Unknown relay";
+
+  const privateServer = privateServers.find(s => s.onion.trim() === normalized);
+  if (privateServer) return privateServer.name;
+
+  if (normalized === LOCAL_DEV_RELAY_URL) return "Local dev relay";
+
+  return "Unknown relay";
+}
+
 function defaultServerUrl(settings: AppSettings): string {
   const choice = settings.defaultServer;
   if (choice.kind === "private") {
     const server = settings.privateServers.find(s => s.id === choice.serverId);
     if (server) return server.onion;
   }
-  return "ws://127.0.0.1:8787/ws";
+  return LOCAL_DEV_RELAY_URL;
 }
 
-function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInviteCodes, defaultServerUrl }: {
+function defaultServerName(settings: AppSettings): string {
+  const choice = settings.defaultServer;
+  if (choice.kind === "private") {
+    const server = settings.privateServers.find(s => s.id === choice.serverId);
+    if (server) return server.name;
+  }
+  return "Local dev relay";
+}
+
+function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInviteCodes, defaultServerUrl, defaultServerName, privateServers }: {
   displayName: string;
   onChangeName: (name: string) => void;
   inviteCodes: InviteCode[];
   onChangeInviteCodes: (inviteCodes: InviteCode[]) => void;
   defaultServerUrl: string;
+  defaultServerName: string;
+  privateServers: PrivateServer[];
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(displayName);
@@ -143,10 +168,12 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
 
   // Change-password modal state
   const [showPwModal, setShowPwModal] = useState(false);
-  const [newPw, setNewPw] = useState("");
-  const [confirmPw, setConfirmPw] = useState("");
+  const newPwRef = useRef<HTMLInputElement>(null);
+  const confirmPwRef = useRef<HTMLInputElement>(null);
+  const [pwReady, setPwReady] = useState(false);
   const [pwError, setPwError] = useState("");
   const [pwBusy, setPwBusy] = useState(false);
+  const [reusableCode, setReusableCode] = useState(false);
 
   const saveName = async () => {
     const trimmed = draft.trim();
@@ -170,18 +197,20 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
   };
 
   useEffect(() => {
-    invoke<Array<{ id: string; code: string; created_at: number; server_url: string }>>("messaging_list_connection_codes")
-      .then(codes => onChangeInviteCodes(codes.map(c => ({ id: c.id, code: c.code, createdAt: c.created_at, serverUrl: c.server_url }))))
+    invoke<Array<{ id: string; code: string; created_at: number; server_url: string; server_name?: string; reusable?: boolean }>>("messaging_list_connection_codes")
+      .then(codes => onChangeInviteCodes(codes.map(c => ({ id: c.id, code: c.code, createdAt: c.created_at, serverUrl: c.server_url, serverName: c.server_name, reusable: c.reusable }))))
       .catch(() => {});
   }, []);
 
   const addCode = async () => {
     try {
-      const next = await invoke<{ id: string; code: string; created_at: number; server_url: string }>("messaging_generate_connection_code", {
+      const next = await invoke<{ id: string; code: string; created_at: number; server_url: string; server_name?: string; reusable?: boolean }>("messaging_generate_connection_code", {
         serverUrl: defaultServerUrl,
+        serverName: defaultServerName,
+        reusable: reusableCode,
       });
-      onChangeInviteCodes([...inviteCodes, { id: next.id, code: next.code, createdAt: next.created_at, serverUrl: next.server_url }]);
-      await invoke("messaging_connect_all").catch(() => {});
+      onChangeInviteCodes([...inviteCodes, { id: next.id, code: next.code, createdAt: next.created_at, serverUrl: next.server_url, serverName: next.server_name, reusable: next.reusable }]);
+      invoke("messaging_connect_all").catch(() => {});
     } catch (e) {
       setSaveError(typeof e === "string" ? e : "Could not generate connection code");
     }
@@ -199,18 +228,24 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
   };
 
   const submitNewPassword = async () => {
-    if (newPw.length < 8) { setPwError("Password must be at least 8 characters."); return; }
+    const newPw = newPwRef.current?.value ?? "";
+    const confirmPw = confirmPwRef.current?.value ?? "";
+    if (newPw.length < 12) { setPwError("Password must be at least 12 characters. A 4-5 word passphrase is better."); return; }
     if (newPw !== confirmPw) { setPwError("Passwords do not match."); return; }
     setPwError("");
     setPwBusy(true);
     try {
       await invoke("change_password", { newPassphrase: newPw });
       setShowPwModal(false);
-      setNewPw("");
-      setConfirmPw("");
+      if (newPwRef.current) newPwRef.current.value = "";
+      if (confirmPwRef.current) confirmPwRef.current.value = "";
+      setPwReady(false);
     } catch (e) {
       setPwError(typeof e === "string" ? e : "Failed to change password.");
     } finally {
+      if (newPwRef.current) newPwRef.current.value = "";
+      if (confirmPwRef.current) confirmPwRef.current.value = "";
+      setPwReady(false);
       setPwBusy(false);
     }
   };
@@ -237,7 +272,7 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
                 <button className="btn btn-primary" onClick={saveName} disabled={!draft.trim()}>Save</button>
                 <button className="btn btn-secondary" onClick={cancelEdit}>Cancel</button>
               </div>
-              {saveError && <div className="onboarding-error" style={{ marginTop: 8 }}>{saveError}</div>}
+              {saveError && <div className="onboarding-error settings-inline-error">{saveError}</div>}
             </div>
           ) : (
             <div className="identity-name-row">
@@ -264,35 +299,50 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
           {inviteCodes.length === 0 && (
             <div className="code-empty">No connection codes. Generate one below.</div>
           )}
-          {inviteCodes.map(c => (
-            <div className="code-item" key={c.id}>
-              <div className="code-main">
-                <span className="code-string" title={c.code}>{compactConnectionCode(c.code)}</span>
-                <span className="code-server" title={c.serverUrl}>Relay: {c.serverUrl || "unknown"}</span>
+          {inviteCodes.map(c => {
+            const relayUrl = c.serverUrl || "unknown";
+            const relayName = c.serverName || relayDisplayNameForUrl(c.serverUrl, privateServers);
+            const relayLabel = `${relayName} — ${relayUrl}`;
+
+            return (
+              <div className="code-item" key={c.id}>
+                <div className="code-main">
+                  <span className="code-string" title={c.code}>{compactConnectionCode(c.code)}</span>
+                  <div className="code-server" title={relayLabel}>
+                    Relay: {relayLabel}
+                    {!c.reusable && <span style={{ marginLeft: '8px', padding: '2px 6px', background: 'var(--red-900)', color: 'var(--red-100)', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 600 }}>SINGLE-USE</span>}
+                  </div>
+                </div>
+                <div className="code-actions">
+                  <button
+                    className="code-action-btn"
+                    onClick={() => copyCode(c.id, c.code)}
+                    title="Copy code"
+                  >
+                    {copied === c.id ? <IconCheck /> : <IconCopy />}
+                  </button>
+                  <button
+                    className="code-action-btn danger"
+                    onClick={() => removeCode(c.id)}
+                    title="Delete code"
+                  >
+                    <IconTrash />
+                  </button>
+                </div>
               </div>
-              <div className="code-actions">
-                <button
-                  className="code-action-btn"
-                  onClick={() => copyCode(c.id, c.code)}
-                  title="Copy code"
-                >
-                  {copied === c.id ? <IconCheck /> : <IconCopy />}
-                </button>
-                <button
-                  className="code-action-btn danger"
-                  onClick={() => removeCode(c.id)}
-                  title="Delete code"
-                >
-                  <IconTrash />
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
-        <button className="btn btn-secondary inviteCodes-generate-btn" onClick={addCode}>
-          <IconPlus /> Generate new code
-        </button>
+        <div className="inviteCodes-generate-row" style={{ display: 'flex', alignItems: 'center', gap: '16px', marginTop: '16px' }}>
+          <button className="btn btn-secondary inviteCodes-generate-btn" onClick={addCode} style={{ margin: 0 }}>
+            <IconPlus /> Generate new code
+          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+            <Toggle on={reusableCode} onChange={setReusableCode} />
+            <span title="When enabled, this code can be used by multiple people.">Allow multiple uses</span>
+          </div>
+        </div>
       </div>
 
       <Row
@@ -302,7 +352,7 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
       />
 
       {showPwModal && (
-        <div className="settings-modal-backdrop" onClick={() => !pwBusy && setShowPwModal(false)}>
+        <div className="settings-modal-backdrop" onClick={() => { if (!pwBusy) { if (newPwRef.current) newPwRef.current.value = ""; if (confirmPwRef.current) confirmPwRef.current.value = ""; setPwReady(false); setShowPwModal(false); } }}>
           <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
             <h3 className="settings-modal-title">Change password</h3>
             <p className="settings-modal-desc">
@@ -313,23 +363,23 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
               type="password"
               className="text-input"
               placeholder="New password"
-              value={newPw}
-              onChange={(e) => { setNewPw(e.target.value); setPwError(""); }}
+              ref={newPwRef}
+              onChange={(e) => { setPwReady(e.currentTarget.value.length > 0 && (confirmPwRef.current?.value.length ?? 0) > 0); setPwError(""); }}
               autoFocus
             />
             <input
               type="password"
               className="text-input"
               placeholder="Confirm new password"
-              value={confirmPw}
-              onChange={(e) => { setConfirmPw(e.target.value); setPwError(""); }}
+              ref={confirmPwRef}
+              onChange={(e) => { setPwReady(e.currentTarget.value.length > 0 && (newPwRef.current?.value.length ?? 0) > 0); setPwError(""); }}
             />
             {pwError && <div className="onboarding-error">{pwError}</div>}
             <div className="button-row">
-              <button className="btn btn-primary" onClick={submitNewPassword} disabled={pwBusy || !newPw || !confirmPw}>
+              <button className="btn btn-primary" onClick={submitNewPassword} disabled={pwBusy || !pwReady}>
                 {pwBusy ? "Saving…" : "Save"}
               </button>
-              <button className="btn btn-secondary" onClick={() => setShowPwModal(false)} disabled={pwBusy}>Cancel</button>
+              <button className="btn btn-secondary" onClick={() => { if (newPwRef.current) newPwRef.current.value = ""; if (confirmPwRef.current) confirmPwRef.current.value = ""; setPwReady(false); setShowPwModal(false); }} disabled={pwBusy}>Cancel</button>
             </div>
           </div>
         </div>
