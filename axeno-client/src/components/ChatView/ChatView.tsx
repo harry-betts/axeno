@@ -33,9 +33,9 @@ export default function ChatView({ contact, messages, onOpenChatSettings, onSend
     if (!text || sending) return;
     setSending(true);
     setSendError("");
+    setInput("");
     try {
       await onSendMessage(text);
-      setInput("");
     } catch (e) {
       setSendError(typeof e === "string" ? e : "Could not send message");
     } finally {

@@ -165,6 +165,7 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
   const [draft, setDraft] = useState(displayName);
   const [copied, setCopied] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string>("");
+  const [generating, setGenerating] = useState(false);
 
   // Change-password modal state
   const [showPwModal, setShowPwModal] = useState(false);
@@ -203,6 +204,9 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
   }, []);
 
   const addCode = async () => {
+    if (generating) return;
+    setGenerating(true);
+    setSaveError("");
     try {
       const next = await invoke<{ id: string; code: string; created_at: number; server_url: string; server_name?: string; reusable?: boolean }>("messaging_generate_connection_code", {
         serverUrl: defaultServerUrl,
@@ -213,6 +217,8 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
       invoke("messaging_connect_all").catch(() => {});
     } catch (e) {
       setSaveError(typeof e === "string" ? e : "Could not generate connection code");
+    } finally {
+      setGenerating(false);
     }
   };
 
@@ -335,13 +341,22 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
         </div>
 
         <div className="inviteCodes-generate-row" style={{ display: 'flex', alignItems: 'center', gap: '16px', marginTop: '16px' }}>
-          <button className="btn btn-secondary inviteCodes-generate-btn" onClick={addCode} style={{ margin: 0 }}>
-            <IconPlus /> Generate new code
+          <button className="btn btn-secondary inviteCodes-generate-btn" onClick={addCode} style={{ margin: 0 }} disabled={generating}>
+            {generating ? (
+              <><span className="onboarding-spinner" style={{ width: 16, height: 16, borderWidth: 2, marginRight: 8 }} /> Generating…</>
+            ) : (
+              <><IconPlus /> Generate new code</>
+            )}
           </button>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-            <Toggle on={reusableCode} onChange={setReusableCode} />
-            <span title="When enabled, this code can be used by multiple people.">Allow multiple uses</span>
-          </div>
+          {generating && (
+            <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>This may take a minute over Tor</span>
+          )}
+          {!generating && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+              <Toggle on={reusableCode} onChange={setReusableCode} />
+              <span title="When enabled, this code can be used by multiple people.">Allow multiple uses</span>
+            </div>
+          )}
         </div>
       </div>
 

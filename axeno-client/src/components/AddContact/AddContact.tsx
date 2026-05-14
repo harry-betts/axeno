@@ -47,6 +47,7 @@ export default function AddContact({ onClose, onAdded }: Props) {
           <input type="text" className="text-input mono add-contact-input" placeholder="axn1_..." value={code} onChange={e => { setCode(e.target.value); setError(""); }} autoFocus spellCheck={false} />
 
           {error && <div className="onboarding-error">{error}</div>}
+          {busy && <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontStyle: 'italic', marginTop: 4 }}>Connecting over Tor — this may take a minute…</div>}
 
           <div className="add-contact-actions">
             <button className="btn btn-primary" disabled={!code.trim() || busy} onClick={add}>{busy ? "Adding…" : "Add contact"}</button>

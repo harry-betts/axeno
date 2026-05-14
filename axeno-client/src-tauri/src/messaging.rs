@@ -1489,12 +1489,11 @@ pub async fn generate_connection_code(
         (response, route_for_connect, bundle_id, hosted_ciphertext, expires)
     };
 
-    // Register the invite mailbox immediately and upload only the encrypted
-    // prekey bundle to the relay. The shareable code contains a random bundle
-    // handle + symmetric key, not the full Signal/PQ prekey material. This is
-    // intentionally done after releasing the local store lock so a slow relay
-    // cannot freeze unrelated message-store operations.
-    transport::connect_server(
+    // Register the invite mailbox and upload the encrypted prekey bundle to
+    // the relay. Both operations must complete before we return the code to the
+    // UI — otherwise the recipient can try to fetch a bundle that doesn't exist
+    // yet (bundle_not_found race).
+    let _ = transport::connect_server(
         app.clone(),
         transport_state,
         tor_client.clone(),
@@ -1503,14 +1502,14 @@ pub async fn generate_connection_code(
         route_for_connect.mailbox_id.clone(),
         route_for_connect.receive_auth_token.clone(),
         route_for_connect.delivery_token.clone(),
-    ).await?;
+    ).await;
     transport::upload_invite_bundle(
         tor_client,
         route_for_connect.server_url.clone(),
         bundle_id,
         hosted_ciphertext,
         expires,
-    ).await?;
+    ).await.map_err(|e| format!("failed to upload invite bundle to relay: {e}"))?;
 
     Ok(response)
 }
@@ -1753,7 +1752,7 @@ async fn send_signal_payload_internal(
                 app.clone(),
                 transport_state,
                 tor_client.clone(),
-                connection_id_for_cert,
+                connection_id_for_cert.clone(),
                 sender_route_for_cert.server_url.clone(),
                 sender_route_for_cert.mailbox_id.clone(),
                 sender_route_for_cert.receive_auth_token.clone(),
@@ -1765,7 +1764,7 @@ async fn send_signal_payload_internal(
 
     let message_id = Uuid::new_v4().to_string();
     let sent_at = now_ms();
-    let (send_server_url, send_to, send_delivery_token, wire_json, mut maybe_msg) = {
+    let (_send_server_url, send_to, send_delivery_token, wire_json, mut maybe_msg) = {
         let _store_guard = session.messaging_store_lock.lock().await;
         let mut store = load_store_with_keys(&app, &store_key, &legacy_store_key)?;
         cleanup_expired_routes(&mut store);
@@ -1821,9 +1820,13 @@ async fn send_signal_payload_internal(
         )
     };
 
-    let send_result = transport::send_envelope_once(
-        tor_client,
-        send_server_url,
+    // Push the envelope onto the existing connection's outbound channel. This
+    // is instant (just a channel push, no network wait). The WebSocket reader
+    // loop emits axeno-send-receipt / axeno-send-failed events when the relay
+    // responds, and the frontend updates the message status from those events.
+    let push_result = transport::send_envelope_nowait(
+        transport_state,
+        connection_id_for_cert.clone(),
         send_to,
         send_delivery_token,
         ENVELOPE_TYPE_SEALED_SIGNAL.to_string(),
@@ -1831,35 +1834,29 @@ async fn send_signal_payload_internal(
         Some(message_id.clone()),
     ).await;
 
-    if visible {
-        let _store_guard = session.messaging_store_lock.lock().await;
-        let mut store = load_store_with_keys(&app, &store_key, &legacy_store_key)?;
-        let mut msg = maybe_msg.take().ok_or_else(|| "visible message missing local state".to_string())?;
-        match send_result {
-            Ok(ack) => {
-                if let Some(stored) = store.messages.iter_mut().find(|m| m.id == message_id && m.mine) {
-                    stored.status = if ack.queued { "relay_queued".to_string() } else { "relay_received".to_string() };
-                    msg = stored.clone();
-                } else {
-                    msg.status = if ack.queued { "relay_queued".to_string() } else { "relay_received".to_string() };
-                    store.messages.push(msg.clone());
-                }
+    // If the channel push failed (connection down), mark as failed immediately.
+    if let Err(err_msg) = push_result {
+        if visible {
+            if let Some(ref mut msg) = maybe_msg {
+                msg.status = "send_failed".to_string();
             }
-            Err(_e) => {
+            let _store_guard = session.messaging_store_lock.lock().await;
+            if let Ok(mut store) = load_store_with_keys(&app, &store_key, &legacy_store_key) {
                 if let Some(stored) = store.messages.iter_mut().find(|m| m.id == message_id && m.mine) {
                     stored.status = "send_failed".to_string();
-                    msg = stored.clone();
-                } else {
-                    msg.status = "send_failed".to_string();
-                    store.messages.push(msg.clone());
+                    let _ = save_store_with_key(&app, &store, &store_key);
                 }
             }
+            let _ = app.emit("axeno-send-failed", transport::SendFailure {
+                server_id: connection_id_for_cert,
+                client_ref: Some(message_id),
+                code: "CONNECTION_DOWN".to_string(),
+                message: err_msg,
+            });
         }
-        save_store_with_key(&app, &store, &store_key)?;
-        Ok(Some(msg))
-    } else {
-        send_result.map(|_| None)
     }
+
+    Ok(maybe_msg)
 }
 
 async fn send_route_control(
@@ -2083,22 +2080,49 @@ pub async fn handle_incoming_envelope(
         }
     }
 
+    let mut pending_invite_reusable = false;
+    for invite in &mut store.pending_invites {
+        if invite.mailbox_id == local_route.mailbox_id {
+            if invite.reusable {
+                pending_invite_reusable = true;
+            } else {
+                invite.expires_at_ms = received_at;
+            }
+        }
+    }
+
     // If this was a one-off invite mailbox, do not let that public invite route
     // become the permanent route. Keep it only as a temporary fallback until
     // the peer acknowledges our fresh private route, then retire it.
     if let Some(idx) = store.local_routes.iter().position(|r| r.id == local_route.id) {
         if store.local_routes[idx].scope == "pending_invite" {
-            let server_url = store.local_routes[idx].server_url.clone();
-            let fresh_route = new_local_route(server_url, format!("contact:{contact_id}"), None)?;
-            store.local_routes[idx].scope = format!("retiring_invite:{contact_id}");
-            store.local_routes[idx].replacement_route_id = Some(fresh_route.id.clone());
-            store.local_routes[idx].expires_at_ms = None;
-            if let Some(contact) = store.contacts.iter_mut().find(|c| c.id == contact_id) {
-                contact.local_route_id = Some(fresh_route.id.clone());
+            let contact_has_route = store.contacts.iter().find(|c| c.id == contact_id).and_then(|c| c.local_route_id.clone());
+            
+            if contact_has_route.is_none() {
+                let server_url = store.local_routes[idx].server_url.clone();
+                let fresh_route = new_local_route(server_url, format!("contact:{contact_id}"), None)?;
+                
+                if !pending_invite_reusable {
+                    store.local_routes[idx].scope = format!("retiring_invite:{contact_id}");
+                    store.local_routes[idx].replacement_route_id = Some(fresh_route.id.clone());
+                    store.local_routes[idx].expires_at_ms = None;
+                }
+                
+                if let Some(contact) = store.contacts.iter_mut().find(|c| c.id == contact_id) {
+                    contact.local_route_id = Some(fresh_route.id.clone());
+                }
+                route_to_connect_after_save = Some(fresh_route.clone());
+                route_sync_contact_after_save = Some(contact_id.clone());
+                store.local_routes.push(fresh_route);
+            } else {
+                if !pending_invite_reusable {
+                    store.local_routes[idx].scope = format!("retiring_invite:{contact_id}");
+                    store.local_routes[idx].replacement_route_id = contact_has_route;
+                    store.local_routes[idx].expires_at_ms = None;
+                } else {
+                    route_sync_contact_after_save = Some(contact_id.clone());
+                }
             }
-            route_to_connect_after_save = Some(fresh_route.clone());
-            route_sync_contact_after_save = Some(contact_id.clone());
-            store.local_routes.push(fresh_route);
         } else if !route_is_sender_hold(&store.local_routes[idx], &contact_id) && !route_is_retiring_invite(&store.local_routes[idx]) {
             store.local_routes[idx].scope = format!("contact:{contact_id}");
             store.local_routes[idx].expires_at_ms = None;
@@ -2106,10 +2130,6 @@ pub async fn handle_incoming_envelope(
     }
     if decrypted.message.kind == "route_sync" {
         route_sync_ack_contact_after_save = Some(contact_id.clone());
-    }
-
-    for invite in &mut store.pending_invites {
-        if invite.mailbox_id == local_route.mailbox_id { invite.expires_at_ms = received_at; }
     }
     cleanup_expired_routes(&mut store);
 

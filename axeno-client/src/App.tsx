@@ -292,9 +292,32 @@ export default function App() {
   };
 
   const sendMessage = async (contactId: string, text: string) => {
-    const res = await invoke<SendMessageResponse>("messaging_send_text_message", { contactId, text });
-    const msg = messageFromBackend(res.message);
-    setMessages(prev => ({ ...prev, [contactId]: [...(prev[contactId] ?? []), msg] }));
+    // Optimistic: show bubble immediately with "sending" status
+    const optimisticId = `pending_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const optimisticMsg: Message = {
+      id: optimisticId,
+      text,
+      mine: true,
+      timestamp: Date.now(),
+      status: "relay_pending",
+    };
+    setMessages(prev => ({ ...prev, [contactId]: [...(prev[contactId] ?? []), optimisticMsg] }));
+
+    try {
+      const res = await invoke<SendMessageResponse>("messaging_send_text_message", { contactId, text });
+      const msg = messageFromBackend(res.message);
+      // Replace optimistic message with real one from backend
+      setMessages(prev => {
+        const existing = prev[contactId] ?? [];
+        return { ...prev, [contactId]: existing.map(m => m.id === optimisticId ? msg : m) };
+      });
+    } catch {
+      // Mark optimistic message as failed
+      setMessages(prev => {
+        const existing = prev[contactId] ?? [];
+        return { ...prev, [contactId]: existing.map(m => m.id === optimisticId ? { ...m, status: "send_failed" } : m) };
+      });
+    }
   };
 
   const migrateContactRelay = async (contactId: string, code: string) => {

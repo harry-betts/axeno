@@ -320,6 +320,37 @@ pub async fn send_envelope(
     }
 }
 
+/// Push a send-envelope frame onto the existing connection's outbound channel
+/// without waiting for the relay's ack. The WebSocket reader loop will emit
+/// `axeno-send-receipt` or `axeno-send-failed` events when the relay responds.
+/// Returns immediately after the channel push succeeds.
+pub async fn send_envelope_nowait(
+    state: &TransportState,
+    server_id: String,
+    to: String,
+    delivery_token: String,
+    envelope_type: String,
+    ciphertext: String,
+    client_ref: Option<String>,
+) -> Result<(), String> {
+    validate_recipient_id(&to)?;
+    validate_token(&delivery_token, "delivery token")?;
+    if envelope_type.len() > 32 { return Err("envelope_type is too long".into()); }
+    if ciphertext.len() > 512 * 1024 { return Err("ciphertext exceeds 512 KiB frame limit".into()); }
+
+    let guard = state.connections.lock().await;
+    match guard.get(&server_id) {
+        Some(conn) => conn.outbound.try_send(ClientFrame::SendEnvelope {
+            client_ref,
+            to,
+            delivery_token,
+            envelope_type,
+            ciphertext,
+        }).map_err(|e| format!("server connection is not accepting frames; reconnect and try again: {e}")),
+        None => Err("server is not connected".to_string()),
+    }
+}
+
 /// Send one opaque envelope over a fresh unauthenticated WebSocket.
 ///
 /// This deliberately does not reuse the authenticated receive mailbox socket.
@@ -353,8 +384,7 @@ pub async fn send_envelope_once(
     let parsed = parse_ws_url(&url)?;
     if parsed.host.ends_with(".onion") {
         let client = tor_client.lock().await.clone().ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let isolated = client.isolated_client();
-        let stream = isolated.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
+        let stream = client.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
         let request = url.clone().into_client_request().map_err(|e| e.to_string())?;
         let (ws, _) = client_async(request, stream).await.map_err(|e| format!("onion websocket handshake failed: {e}"))?;
         run_send_envelope_ws(ws, frame, client_ref).await
@@ -476,8 +506,7 @@ pub async fn request_sender_certificate_once(
     let parsed = parse_ws_url(&url)?;
     if parsed.host.ends_with(".onion") {
         let client = tor_client.lock().await.clone().ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let isolated = client.isolated_client();
-        let stream = isolated.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
+        let stream = client.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
         let request = url.clone().into_client_request().map_err(|e| e.to_string())?;
         let (ws, _) = client_async(request, stream).await.map_err(|e| format!("onion websocket handshake failed: {e}"))?;
         run_sender_certificate_once_ws(ws, sender_uuid, auth_token, delivery_token, sender_device_id, sender_cert_public_b64).await
@@ -554,8 +583,7 @@ pub async fn upload_invite_bundle(
     let parsed = parse_ws_url(&url)?;
     if parsed.host.ends_with(".onion") {
         let client = tor_client.lock().await.clone().ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let isolated = client.isolated_client();
-        let stream = isolated.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
+        let stream = client.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
         let request = url.clone().into_client_request().map_err(|e| e.to_string())?;
         let (ws, _) = client_async(request, stream).await.map_err(|e| format!("onion websocket handshake failed: {e}"))?;
         run_upload_bundle_ws(ws, frame, request_id, bundle_id).await
@@ -578,8 +606,7 @@ pub async fn fetch_invite_bundle(
     let parsed = parse_ws_url(&url)?;
     if parsed.host.ends_with(".onion") {
         let client = tor_client.lock().await.clone().ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let isolated = client.isolated_client();
-        let stream = isolated.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
+        let stream = client.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
         let request = url.clone().into_client_request().map_err(|e| e.to_string())?;
         let (ws, _) = client_async(request, stream).await.map_err(|e| format!("onion websocket handshake failed: {e}"))?;
         run_fetch_bundle_ws(ws, frame, request_id, bundle_id).await
@@ -604,8 +631,7 @@ pub async fn retire_mailbox_once(
     let parsed = parse_ws_url(&url)?;
     if parsed.host.ends_with(".onion") {
         let client = tor_client.lock().await.clone().ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let isolated = client.isolated_client();
-        let stream = isolated.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
+        let stream = client.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
         let request = url.clone().into_client_request().map_err(|e| e.to_string())?;
         let (ws, _) = client_async(request, stream).await.map_err(|e| format!("onion websocket handshake failed: {e}"))?;
         run_retire_mailbox_ws(ws, recipient_id, auth_token, delivery_token).await
@@ -761,8 +787,7 @@ async fn run_connection(
             .await
             .clone()
             .ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let isolated = client.isolated_client();
-        let stream = isolated
+        let stream = client
             .connect((parsed.host.as_str(), parsed.port))
             .await
             .map_err(|e| format!("Tor connect failed: {e}"))?;

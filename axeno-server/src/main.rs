@@ -254,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
         total_queued_bytes: Arc::new(AtomicUsize::new(queued_bytes)),
         crypto: Arc::new(crypto),
         disk_crypto: Arc::new(disk_crypto_cached),
-        data_dir: Arc::new(data_dir),
+        data_dir: Arc::new(data_dir.clone()),
         dirty: dirty.clone(),
     };
 
@@ -282,7 +282,95 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "Axeno relay listening");
+
+    if addr.ip().is_loopback() {
+        if let Err(e) = start_tor_hidden_service(addr.port(), &data_dir).await {
+            warn!("Failed to start automatic Tor hidden service: {}", e);
+        }
+    } else {
+        info!("Server is bound to public IP; skipping automatic Tor hidden service creation.");
+    }
+
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn start_tor_hidden_service(port: u16, data_dir: &std::path::Path) -> anyhow::Result<()> {
+    if tokio::process::Command::new("tor").arg("--version").output().await.is_err() {
+        warn!("Tor is not installed or not in PATH. Skipping automatic Hidden Service creation.");
+        warn!("To run over Tor, please install tor (e.g. `apt install tor`) and restart the server.");
+        return Ok(());
+    }
+
+    let tor_dir = data_dir.join("tor");
+    let hs_dir = tor_dir.join("hs");
+    let torrc_path = tor_dir.join("torrc");
+
+    fs::create_dir_all(&hs_dir)?;
+    
+    // Set strict permissions on the hidden service directory (Tor requires 0700)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hs_dir, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&tor_dir, fs::Permissions::from_mode(0o700))?;
+    }
+
+    let torrc_content = format!(
+        "DataDirectory {data_dir}\n\
+         HiddenServiceDir {hs_dir}\n\
+         HiddenServiceVersion 3\n\
+         HiddenServicePort 80 127.0.0.1:{port}\n\
+         SocksPort 0\n\
+         Log notice stdout\n",
+        data_dir = tor_dir.display(),
+        hs_dir = hs_dir.display(),
+        port = port
+    );
+    fs::write(&torrc_path, torrc_content)?;
+
+    info!("Starting Tor daemon for automatic Hidden Service...");
+    
+    let pid = std::process::id();
+    let mut child = tokio::process::Command::new("tor")
+        .arg("-f")
+        .arg(&torrc_path)
+        .arg("__OwningControllerProcess")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let hs_dir_clone = hs_dir.clone();
+    tokio::spawn(async move {
+        let hostname_path = hs_dir_clone.join("hostname");
+        let mut retries = 0;
+        while retries < 30 {
+            if let Ok(hostname) = fs::read_to_string(&hostname_path) {
+                info!("==================================================");
+                info!("Tor Hidden Service started successfully!");
+                info!("Your relay onion address is: ws://{}/ws", hostname.trim());
+                info!("==================================================");
+                
+                // Write it to a file so the user can easily copy/paste it without terminal fighting
+                if let Ok(pwd) = std::env::current_dir() {
+                    let _ = fs::write(pwd.join("onion_address.txt"), format!("ws://{}/ws", hostname.trim()));
+                }
+                
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            retries += 1;
+        }
+        warn!("Tor was started but the hostname file was not generated in time.");
+    });
+
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+        warn!("Tor daemon process exited.");
+    });
+
     Ok(())
 }
 
@@ -867,11 +955,7 @@ fn verify_pow(recipient_id: &str, nonce: &str) -> bool {
         }
     }
 
-    // Legacy format fallback (plain nonce without timestamp) — allows old
-    // clients to connect during rolling upgrade. Remove after one release cycle.
-    let input = format!("{recipient_id}:{nonce}");
-    let hash = Sha256::digest(input.as_bytes());
-    hash[0] == 0 && hash[1] == 0
+    false
 }
 
 fn token_hash(token: &str) -> String { hex::encode(Sha256::digest(token.as_bytes())) }
