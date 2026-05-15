@@ -1,7 +1,6 @@
 node_modules/
 dist/
 axeno-client2/
-run-two-client-test.sh
 # Rust
 target/
 

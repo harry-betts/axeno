@@ -200,7 +200,7 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
   useEffect(() => {
     invoke<Array<{ id: string; code: string; created_at: number; server_url: string; server_name?: string; reusable?: boolean }>>("messaging_list_connection_codes")
       .then(codes => onChangeInviteCodes(codes.map(c => ({ id: c.id, code: c.code, createdAt: c.created_at, serverUrl: c.server_url, serverName: c.server_name, reusable: c.reusable }))))
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   const addCode = async () => {
@@ -214,7 +214,7 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
         reusable: reusableCode,
       });
       onChangeInviteCodes([...inviteCodes, { id: next.id, code: next.code, createdAt: next.created_at, serverUrl: next.server_url, serverName: next.server_name, reusable: next.reusable }]);
-      invoke("messaging_connect_all").catch(() => {});
+      invoke("messaging_connect_all").catch(() => { });
     } catch (e) {
       setSaveError(typeof e === "string" ? e : "Could not generate connection code");
     } finally {
@@ -223,7 +223,7 @@ function IdentitySection({ displayName, onChangeName, inviteCodes, onChangeInvit
   };
 
   const removeCode = async (id: string) => {
-    await invoke("messaging_delete_connection_code", { id }).catch(() => {});
+    await invoke("messaging_delete_connection_code", { id }).catch(() => { });
     onChangeInviteCodes(inviteCodes.filter(c => c.id !== id));
   };
 
@@ -546,11 +546,7 @@ function AboutSection({ torStatus, torError }: { torStatus: "connecting" | "conn
   return (
     <Section title="About">
       <div className="about-block">
-        <div className="about-row"><span>Version</span><span className="mono">0.1.0-dev</span></div>
-        <div className="about-row"><span>Protocol</span><span>1:1 text uses libsignal-protocol sessions and libsignal Sealed Sender envelopes. Sender certificates are route-scoped so the relay does not receive your long-term Signal identity key.</span></div>
-        <div className="about-row"><span>Relay metadata</span><span>The relay sees destination mailboxes, delivery-token proof, ciphertext size/timing, and the authenticated receive mailbox for the socket used to submit a send. Axeno now uses per-contact return mailboxes to reduce cross-contact linking, but it is not mixnet-level anonymous.</span></div>
-        <div className="about-row"><span>Transport</span><span>Local WebSocket for development; .onion WebSocket through Tor for real relay use.</span></div>
-        <div className="about-row"><span>Tor status</span><span>{torLabel}</span></div>
+        <div className="about-row"><span>Version</span><span className="mono">alpha-0.01</span></div>
       </div>
     </Section>
   );
