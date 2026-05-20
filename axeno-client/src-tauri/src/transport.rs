@@ -6,11 +6,11 @@
 
 use std::{collections::HashMap, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 
-use arti_client::TorClient;
+use arti_client::{DataStream, TorClient};
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::{io::{AsyncRead, AsyncWrite}, sync::{mpsc, oneshot, Mutex}, time::{timeout, Duration}};
+use tokio::{io::{AsyncRead, AsyncWrite}, sync::{mpsc, oneshot, Mutex}, time::{sleep, timeout, Duration, Instant}};
 use tokio_tungstenite::{connect_async, client_async, tungstenite::{client::IntoClientRequest, Message}, WebSocketStream};
 use tor_rtcompat::PreferredRuntime;
 use uuid::Uuid;
@@ -18,6 +18,8 @@ use uuid::Uuid;
 const PROTOCOL_MIN_SUPPORTED: u16 = 4;
 const PROTOCOL_VERSION: u16 = 5;
 const OUTBOUND_QUEUE_CAPACITY: usize = 256;
+const ONION_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+const ONION_CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(150);
 
 #[derive(Clone, Default)]
 pub struct TransportState {
@@ -36,6 +38,7 @@ impl TransportState {
 struct ServerConnection {
     url: String,
     recipient_id: String,
+    instance_id: Uuid,
     outbound: mpsc::Sender<ClientFrame>,
 }
 
@@ -75,7 +78,7 @@ async fn generate_pow(recipient_id: &str) -> String {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(dead_code)]
 enum ClientFrame {
-    Hello { recipient_id: String, auth_token: String, delivery_token: String, protocol_min: u16, protocol_max: u16, pow: Option<String> },
+    Hello { recipient_id: String, auth_token: String, delivery_token: String, protocol_min: u16, protocol_max: u16, pow: Option<String>, cert_only: bool },
     SetDeliveryTokens { request_id: String, tokens: Vec<String> },
     IssueSenderCertificate { request_id: String, sender_uuid: String, sender_device_id: u32, sender_cert_public_b64: String },
     SendEnvelope {
@@ -176,7 +179,8 @@ pub async fn connect_server(
     }
 
     let (tx, rx) = mpsc::channel::<ClientFrame>(OUTBOUND_QUEUE_CAPACITY);
-    guard.insert(server_id.clone(), ServerConnection { url: url.clone(), recipient_id: recipient_id.clone(), outbound: tx.clone() });
+    let instance_id = Uuid::new_v4();
+    guard.insert(server_id.clone(), ServerConnection { url: url.clone(), recipient_id: recipient_id.clone(), instance_id, outbound: tx.clone() });
     drop(guard);
 
     let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
@@ -190,7 +194,7 @@ pub async fn connect_server(
     tokio::spawn(async move {
         let _ = emit_status(&app_for_task, &task_server_id, "connecting", None);
         let result = run_connection(app_for_task.clone(), tor_client, pending_certs, pending_token_updates, pending_sends, trust_roots, task_server_id.clone(), url, recipient_id, auth_token, delivery_token, rx, Some(ready_tx)).await;
-        connections.lock().await.remove(&task_server_id);
+        remove_connection_if_same(&connections, &task_server_id, instance_id).await;
         match result {
             Ok(()) => { let _ = emit_status(&app_for_task, &task_server_id, "disconnected", None); }
             Err(e) => { let _ = emit_status(&app_for_task, &task_server_id, "failed", Some(e)); }
@@ -199,9 +203,27 @@ pub async fn connect_server(
 
     match timeout(Duration::from_secs(10), ready_rx).await {
         Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(e))) => { state.connections.lock().await.remove(&server_id); Err(e) }
-        Ok(Err(_)) => { state.connections.lock().await.remove(&server_id); Err("relay connection closed before registration completed".to_string()) }
-        Err(_) => { state.connections.lock().await.remove(&server_id); Err("timed out waiting for relay registration".to_string()) }
+        Ok(Ok(Err(e))) => { remove_connection_if_same(&state.connections, &server_id, instance_id).await; Err(e) }
+        Ok(Err(_)) => { remove_connection_if_same(&state.connections, &server_id, instance_id).await; Err("relay connection closed before registration completed".to_string()) }
+        Err(_) => {
+            // Onion hidden-service circuits often take longer than the UI wait
+            // budget immediately after a relay restart. Keep this in-progress
+            // route in the map so queued cert requests can complete once the
+            // background websocket reaches HelloOk.
+            Err("timed out waiting for relay registration".to_string())
+        }
+    }
+}
+
+async fn remove_connection_if_same(
+    connections: &Arc<Mutex<HashMap<String, ServerConnection>>>,
+    server_id: &str,
+    instance_id: Uuid,
+) {
+    let mut guard = connections.lock().await;
+    let is_ours = guard.get(server_id).map(|c| c.instance_id == instance_id).unwrap_or(false);
+    if is_ours {
+        guard.remove(server_id);
     }
 }
 
@@ -351,6 +373,42 @@ pub async fn send_envelope_nowait(
     }
 }
 
+async fn connect_onion_stream_with_retries(
+    tor_client: Arc<Mutex<Option<TorClient<PreferredRuntime>>>>,
+    host: &str,
+    port: u16,
+) -> Result<DataStream, String> {
+    let client = tor_client.lock().await.clone().ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
+    let started = Instant::now();
+    let mut attempt = 0u32;
+
+    loop {
+        attempt = attempt.saturating_add(1);
+        let last_error = match timeout(ONION_CONNECT_ATTEMPT_TIMEOUT, client.connect((host, port))).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(e)) => format!("Tor connect failed: {e}"),
+            Err(_) => format!("Tor connect timed out after {}s", ONION_CONNECT_ATTEMPT_TIMEOUT.as_secs()),
+        };
+
+        let elapsed = started.elapsed();
+        if elapsed >= ONION_CONNECT_RETRY_WINDOW {
+            return Err(format!(
+                "{last_error}; gave up after {attempt} attempts over about {}s while waiting for hidden-service reachability after restart",
+                elapsed.as_secs()
+            ));
+        }
+        let delay_secs = match attempt {
+            0 | 1 => 1,
+            2 => 2,
+            3 => 4,
+            4 => 8,
+            _ => 12,
+        };
+        let remaining = ONION_CONNECT_RETRY_WINDOW.saturating_sub(elapsed);
+        sleep(Duration::from_secs(delay_secs).min(remaining)).await;
+    }
+}
+
 /// Send one opaque envelope over a fresh unauthenticated WebSocket.
 ///
 /// This deliberately does not reuse the authenticated receive mailbox socket.
@@ -383,8 +441,7 @@ pub async fn send_envelope_once(
     };
     let parsed = parse_ws_url(&url)?;
     if parsed.host.ends_with(".onion") {
-        let client = tor_client.lock().await.clone().ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let stream = client.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
+        let stream = connect_onion_stream_with_retries(tor_client.clone(), &parsed.host, parsed.port).await?;
         let request = url.clone().into_client_request().map_err(|e| e.to_string())?;
         let (ws, _) = client_async(request, stream).await.map_err(|e| format!("onion websocket handshake failed: {e}"))?;
         run_send_envelope_ws(ws, frame, client_ref).await
@@ -505,8 +562,7 @@ pub async fn request_sender_certificate_once(
 
     let parsed = parse_ws_url(&url)?;
     if parsed.host.ends_with(".onion") {
-        let client = tor_client.lock().await.clone().ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let stream = client.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
+        let stream = connect_onion_stream_with_retries(tor_client.clone(), &parsed.host, parsed.port).await?;
         let request = url.clone().into_client_request().map_err(|e| e.to_string())?;
         let (ws, _) = client_async(request, stream).await.map_err(|e| format!("onion websocket handshake failed: {e}"))?;
         run_sender_certificate_once_ws(ws, sender_uuid, auth_token, delivery_token, sender_device_id, sender_cert_public_b64).await
@@ -535,6 +591,7 @@ where
         protocol_min: PROTOCOL_MIN_SUPPORTED,
         protocol_max: PROTOCOL_VERSION,
         pow: Some(generate_pow(&sender_uuid).await),
+        cert_only: true,
     }).await?;
 
     let response = timeout(Duration::from_secs(15), ws.next()).await.map_err(|_| "timed out waiting for sender-certificate hello".to_string())?;
@@ -559,11 +616,42 @@ where
     let Some(response) = response else { return Err("relay closed before sender certificate".to_string()); };
     let message = response.map_err(|e| format!("websocket read failed: {e}"))?;
     let Message::Text(text) = message else { return Err("unexpected non-text relay response".to_string()); };
-    match serde_json::from_str::<ServerFrame>(&text).map_err(|e| format!("bad server frame: {e}"))? {
-        ServerFrame::SenderCertificate { request_id: got_request, certificate_b64, trust_root_b64, expires_at_ms } if got_request == request_id => {
-            Ok(SenderCertificateResponse { certificate_b64, trust_root_b64, expires_at_ms })
+    match sender_certificate_response_from_frame(&text, &request_id)? {
+        CertificateReadResult::Matched(response) => Ok(response),
+        CertificateReadResult::KeepReading => {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err("timed out waiting for sender certificate".to_string());
+                }
+                let response = timeout(remaining, ws.next()).await.map_err(|_| "timed out waiting for sender certificate".to_string())?;
+                let Some(response) = response else { return Err("relay closed before sender certificate".to_string()); };
+                let message = response.map_err(|e| format!("websocket read failed: {e}"))?;
+                let Message::Text(text) = message else { continue; };
+                if let CertificateReadResult::Matched(response) = sender_certificate_response_from_frame(&text, &request_id)? {
+                    return Ok(response);
+                }
+            }
         }
+    }
+}
+
+enum CertificateReadResult {
+    Matched(SenderCertificateResponse),
+    KeepReading,
+}
+
+fn sender_certificate_response_from_frame(text: &str, request_id: &str) -> Result<CertificateReadResult, String> {
+    match serde_json::from_str::<ServerFrame>(text).map_err(|e| format!("bad server frame: {e}"))? {
+        ServerFrame::SenderCertificate { request_id: got_request, certificate_b64, trust_root_b64, expires_at_ms } if got_request == request_id => {
+            Ok(CertificateReadResult::Matched(SenderCertificateResponse { certificate_b64, trust_root_b64, expires_at_ms }))
+        }
+        ServerFrame::SenderCertificate { .. } => Ok(CertificateReadResult::KeepReading),
+        ServerFrame::Envelope { .. } => Ok(CertificateReadResult::KeepReading),
+        ServerFrame::AckOk { .. } | ServerFrame::Pong { .. } => Ok(CertificateReadResult::KeepReading),
         ServerFrame::Error { code, message } => Err(format!("{code}: {message}")),
+        ServerFrame::SendError { code, message, .. } => Err(format!("{code}: {message}")),
         _ => Err("unexpected relay response to sender-certificate request".to_string()),
     }
 }
@@ -582,8 +670,7 @@ pub async fn upload_invite_bundle(
     let frame = ClientFrame::UploadBundle { request_id: request_id.clone(), bundle_id: bundle_id.clone(), ciphertext, expires_at_ms };
     let parsed = parse_ws_url(&url)?;
     if parsed.host.ends_with(".onion") {
-        let client = tor_client.lock().await.clone().ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let stream = client.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
+        let stream = connect_onion_stream_with_retries(tor_client.clone(), &parsed.host, parsed.port).await?;
         let request = url.clone().into_client_request().map_err(|e| e.to_string())?;
         let (ws, _) = client_async(request, stream).await.map_err(|e| format!("onion websocket handshake failed: {e}"))?;
         run_upload_bundle_ws(ws, frame, request_id, bundle_id).await
@@ -605,8 +692,7 @@ pub async fn fetch_invite_bundle(
     let frame = ClientFrame::FetchBundle { request_id: request_id.clone(), bundle_id: bundle_id.clone() };
     let parsed = parse_ws_url(&url)?;
     if parsed.host.ends_with(".onion") {
-        let client = tor_client.lock().await.clone().ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let stream = client.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
+        let stream = connect_onion_stream_with_retries(tor_client.clone(), &parsed.host, parsed.port).await?;
         let request = url.clone().into_client_request().map_err(|e| e.to_string())?;
         let (ws, _) = client_async(request, stream).await.map_err(|e| format!("onion websocket handshake failed: {e}"))?;
         run_fetch_bundle_ws(ws, frame, request_id, bundle_id).await
@@ -630,8 +716,7 @@ pub async fn retire_mailbox_once(
     validate_token(&delivery_token, "delivery token")?;
     let parsed = parse_ws_url(&url)?;
     if parsed.host.ends_with(".onion") {
-        let client = tor_client.lock().await.clone().ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let stream = client.connect((parsed.host.as_str(), parsed.port)).await.map_err(|e| format!("Tor connect failed: {e}"))?;
+        let stream = connect_onion_stream_with_retries(tor_client.clone(), &parsed.host, parsed.port).await?;
         let request = url.clone().into_client_request().map_err(|e| e.to_string())?;
         let (ws, _) = client_async(request, stream).await.map_err(|e| format!("onion websocket handshake failed: {e}"))?;
         run_retire_mailbox_ws(ws, recipient_id, auth_token, delivery_token).await
@@ -700,6 +785,7 @@ where
         protocol_min: PROTOCOL_MIN_SUPPORTED,
         protocol_max: PROTOCOL_VERSION,
         pow: Some(generate_pow(&recipient_id).await),
+        cert_only: false,
     }).await?;
 
     let response = timeout(Duration::from_secs(15), ws.next()).await.map_err(|_| "timed out waiting for mailbox-retire hello".to_string())?;
@@ -782,15 +868,7 @@ async fn run_connection(
         if parsed.scheme != "ws" {
             return Err("onion WebSocket URLs must use ws:// because Tor already provides the transport privacy; wss:// onion TLS is not implemented yet".into());
         }
-        let client = tor_client
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| "Tor is not bootstrapped yet; call bootstrap_tor first".to_string())?;
-        let stream = client
-            .connect((parsed.host.as_str(), parsed.port))
-            .await
-            .map_err(|e| format!("Tor connect failed: {e}"))?;
+        let stream = connect_onion_stream_with_retries(tor_client.clone(), &parsed.host, parsed.port).await?;
         let request = url.clone().into_client_request().map_err(|e| e.to_string())?;
         let (ws, _) = client_async(request, stream)
             .await
@@ -831,6 +909,7 @@ where
         protocol_min: PROTOCOL_MIN_SUPPORTED,
         protocol_max: PROTOCOL_VERSION,
         pow: Some(generate_pow(&recipient_id).await),
+        cert_only: false,
     }).await?;
     let _ = emit_status(&app, &server_id, "connected", None);
 
@@ -1063,5 +1142,65 @@ fn validate_bundle_id(id: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err("invite bundle id must be 16-128 URL-safe characters".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sender_certificate_reader_skips_queued_envelopes() {
+        let envelope = r#"{
+            "type":"envelope",
+            "envelope":{
+                "id":"00000000-0000-0000-0000-000000000001",
+                "to":"mbx_receiver_1234567890",
+                "envelope_type":"axeno_sealed_signal_v1",
+                "ciphertext":"{}"
+            }
+        }"#;
+
+        match sender_certificate_response_from_frame(envelope, "req-1").unwrap() {
+            CertificateReadResult::KeepReading => {}
+            CertificateReadResult::Matched(_) => panic!("queued envelope must not satisfy certificate request"),
+        }
+    }
+
+    #[test]
+    fn sender_certificate_reader_accepts_matching_certificate() {
+        let certificate = r#"{
+            "type":"sender_certificate",
+            "request_id":"req-1",
+            "certificate_b64":"cert",
+            "trust_root_b64":"root",
+            "expires_at_ms":123
+        }"#;
+
+        match sender_certificate_response_from_frame(certificate, "req-1").unwrap() {
+            CertificateReadResult::Matched(response) => {
+                assert_eq!(response.certificate_b64, "cert");
+                assert_eq!(response.trust_root_b64, "root");
+                assert_eq!(response.expires_at_ms, 123);
+            }
+            CertificateReadResult::KeepReading => panic!("matching certificate should complete request"),
+        }
+    }
+
+    #[test]
+    fn sender_certificate_hello_serializes_as_cert_only() {
+        let frame = ClientFrame::Hello {
+            recipient_id: "mbx_sender_1234567890".to_string(),
+            auth_token: "auth_token_123456".to_string(),
+            delivery_token: "delivery_token_123456".to_string(),
+            protocol_min: PROTOCOL_MIN_SUPPORTED,
+            protocol_max: PROTOCOL_VERSION,
+            pow: None,
+            cert_only: true,
+        };
+
+        let value = serde_json::to_value(frame).unwrap();
+        assert_eq!(value.get("type").and_then(|v| v.as_str()), Some("hello"));
+        assert_eq!(value.get("cert_only").and_then(|v| v.as_bool()), Some(true));
     }
 }

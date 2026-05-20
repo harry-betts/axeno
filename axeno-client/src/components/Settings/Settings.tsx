@@ -540,13 +540,14 @@ function AppearanceSection({ settings, onChange }: { settings: AppSettings; onCh
 function AboutSection({ torStatus, torError }: { torStatus: "connecting" | "connected" | "failed"; torError?: string }) {
   const torLabel =
     torStatus === "connected" ? "Connected" :
-      torStatus === "connecting" ? "Bootstrapping…" :
+      torStatus === "connecting" ? "Bootstrapping..." :
         `Failed${torError ? `: ${torError}` : ""}`;
 
   return (
     <Section title="About">
       <div className="about-block">
         <div className="about-row"><span>Version</span><span className="mono">alpha-0.01</span></div>
+        <div className="about-row"><span>Tor</span><span>{torLabel}</span></div>
       </div>
     </Section>
   );

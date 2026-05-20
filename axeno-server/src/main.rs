@@ -31,7 +31,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
+use tokio::{io::{AsyncBufReadExt, BufReader}, sync::mpsc};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -183,6 +183,7 @@ enum ClientFrame {
         #[serde(default)] protocol_max: Option<u16>,
         #[serde(default)] protocol_version: Option<u16>,
         #[serde(default)] pow: Option<String>,
+        #[serde(default)] cert_only: bool,
     },
     SetDeliveryTokens { request_id: String, tokens: Vec<String> },
     IssueSenderCertificate { request_id: String, sender_uuid: String, sender_device_id: u32, sender_cert_public_b64: String },
@@ -337,33 +338,52 @@ async fn start_tor_hidden_service(port: u16, data_dir: &std::path::Path) -> anyh
         .arg(&torrc_path)
         .arg("__OwningControllerProcess")
         .arg(pid.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
 
     let hs_dir_clone = hs_dir.clone();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
     tokio::spawn(async move {
-        let hostname_path = hs_dir_clone.join("hostname");
-        let mut retries = 0;
-        while retries < 30 {
-            if let Ok(hostname) = fs::read_to_string(&hostname_path) {
-                info!("==================================================");
-                info!("Tor Hidden Service started successfully!");
-                info!("Your relay onion address is: ws://{}/ws", hostname.trim());
-                info!("==================================================");
-                
-                // Write it to a file so the user can easily copy/paste it without terminal fighting
-                if let Ok(pwd) = std::env::current_dir() {
-                    let _ = fs::write(pwd.join("onion_address.txt"), format!("ws://{}/ws", hostname.trim()));
-                }
-                
-                return;
+        let Some(stdout) = stdout else { return; };
+        let mut lines = BufReader::new(stdout).lines();
+        let mut announced = false;
+        while let Ok(Some(line)) = lines.next_line().await {
+            info!("tor: {}", line);
+            if announced || !line.contains("Bootstrapped 100%") {
+                continue;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-            retries += 1;
+
+            let hostname_path = hs_dir_clone.join("hostname");
+            for _ in 0..30 {
+                if let Ok(hostname) = fs::read_to_string(&hostname_path) {
+                    info!("==================================================");
+                    info!("Tor Hidden Service bootstrapped.");
+                    info!("Your relay onion address is: ws://{}/ws", hostname.trim());
+                    info!("==================================================");
+                    if let Ok(pwd) = std::env::current_dir() {
+                        let _ = fs::write(pwd.join("onion_address.txt"), format!("ws://{}/ws", hostname.trim()));
+                    }
+                    announced = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            }
+            if !announced {
+                warn!("Tor bootstrapped, but the hidden service hostname file was not available in time.");
+            }
         }
-        warn!("Tor was started but the hostname file was not generated in time.");
+    });
+
+    tokio::spawn(async move {
+        let Some(stderr) = stderr else { return; };
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            warn!("tor: {}", line);
+        }
     });
 
     tokio::spawn(async move {
@@ -643,7 +663,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         };
 
         match frame {
-            ClientFrame::Hello { recipient_id: rid, auth_token, delivery_token, protocol_min, protocol_max, protocol_version, pow } => {
+            ClientFrame::Hello { recipient_id: rid, auth_token, delivery_token, protocol_min, protocol_max, protocol_version, pow, cert_only } => {
                 let client_min = protocol_min.unwrap_or(protocol_version.unwrap_or(PROTOCOL_VERSION));
                 let client_max = protocol_max.unwrap_or(protocol_version.unwrap_or(PROTOCOL_VERSION));
                 let selected = PROTOCOL_VERSION.min(client_max);
@@ -681,7 +701,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 };
                 if changed { persist_runtime_state(&state); }
                 recipient_id = Some(rid.clone());
-                state.online.insert(rid.clone(), tx.clone());
                 let _ = tx.try_send(ServerFrame::HelloOk {
                     protocol_version: selected,
                     min_supported: PROTOCOL_MIN_SUPPORTED,
@@ -689,7 +708,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     server_time_ms: now_ms(),
                     trust_root_b64: state.crypto.trust_root_public_b64.clone(),
                 });
-                flush_queue(&state, &rid, &tx);
+                if !cert_only {
+                    state.online.insert(rid.clone(), tx.clone());
+                    flush_queue(&state, &rid, &tx);
+                }
             }
             ClientFrame::SetDeliveryTokens { request_id, tokens } => {
                 let Some(rid) = recipient_id.as_ref() else { let _ = tx.try_send(err("not_registered", "send hello first")); continue; };
@@ -960,3 +982,39 @@ fn verify_pow(recipient_id: &str, nonce: &str) -> bool {
 
 fn token_hash(token: &str) -> String { hex::encode(Sha256::digest(token.as_bytes())) }
 fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hello_defaults_to_live_receive_socket() {
+        let frame = serde_json::from_str::<ClientFrame>(r#"{
+            "type":"hello",
+            "recipient_id":"mbx_receiver_1234567890",
+            "auth_token":"auth_token_123456",
+            "delivery_token":"delivery_token_123456"
+        }"#).unwrap();
+
+        match frame {
+            ClientFrame::Hello { cert_only, .. } => assert!(!cert_only),
+            _ => panic!("expected hello frame"),
+        }
+    }
+
+    #[test]
+    fn hello_can_be_certificate_only() {
+        let frame = serde_json::from_str::<ClientFrame>(r#"{
+            "type":"hello",
+            "recipient_id":"mbx_receiver_1234567890",
+            "auth_token":"auth_token_123456",
+            "delivery_token":"delivery_token_123456",
+            "cert_only":true
+        }"#).unwrap();
+
+        match frame {
+            ClientFrame::Hello { cert_only, .. } => assert!(cert_only),
+            _ => panic!("expected hello frame"),
+        }
+    }
+}

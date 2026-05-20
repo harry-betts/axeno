@@ -311,12 +311,13 @@ export default function App() {
         const existing = prev[contactId] ?? [];
         return { ...prev, [contactId]: existing.map(m => m.id === optimisticId ? msg : m) };
       });
-    } catch {
+    } catch (e) {
       // Mark optimistic message as failed
       setMessages(prev => {
         const existing = prev[contactId] ?? [];
         return { ...prev, [contactId]: existing.map(m => m.id === optimisticId ? { ...m, status: "send_failed" } : m) };
       });
+      throw e;
     }
   };
 

@@ -101,6 +101,8 @@ pub struct StoredContact {
     pub local_route_id: Option<String>,
     #[serde(default)]
     pub peer_sender_mailbox_id: Option<String>,
+    #[serde(default)]
+    pub acked_local_sender_mailbox_id: Option<String>,
     pub created_at_ms: u64,
     pub last_read_at: Option<u64>,
 }
@@ -212,6 +214,8 @@ pub struct SignalSessionBlob {
     pub device_id: u32,
     pub session_b64: String,
     pub remote_identity_b64: String,
+    #[serde(default)]
+    pub local_address_name: String,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
@@ -497,7 +501,7 @@ fn encode_signal_plaintext(
 
 fn decode_signal_plaintext(raw: Vec<u8>) -> Result<DecryptedSignalText, String> {
     if let Ok(payload) = serde_json::from_slice::<AxenoSignalPlaintext>(&raw) {
-        if payload.v != 1 || !matches!(payload.kind.as_str(), "text" | "route_sync" | "route_sync_ack") {
+        if payload.v != 1 || !matches!(payload.kind.as_str(), "text" | "route_sync" | "route_sync_ack" | "delivery_ack") {
             return Err("unsupported encrypted Axeno message payload".into());
         }
         return Ok(DecryptedSignalText {
@@ -876,19 +880,116 @@ fn prune_old_messages(store: &mut MessagingStore) {
     store.messages = kept;
 }
 
+#[derive(Debug, Clone)]
+struct EnsureRouteOutcome {
+    route: LocalRoute,
+    created_private_route: bool,
+}
+
+fn contact_route_scope(contact_id: &str) -> String {
+    format!("contact:{contact_id}")
+}
+
+fn route_is_durable_contact_route(route: &LocalRoute, contact_id: &str) -> bool {
+    route.active && route.scope == contact_route_scope(contact_id)
+}
+
+fn durable_contact_route_id(store: &MessagingStore, contact_id: &str, server_url: &str) -> Option<String> {
+    let normalized = normalize_server_url(Some(server_url.to_string()));
+    let contact_route_id = store.contacts
+        .iter()
+        .find(|c| c.id == contact_id)
+        .and_then(|contact| contact.local_route_id.clone());
+
+    if let Some(route_id) = contact_route_id {
+        if store.local_routes.iter().any(|route| {
+            route.id == route_id
+                && route.server_url == normalized
+                && route_is_durable_contact_route(route, contact_id)
+        }) {
+            return Some(route_id);
+        }
+    }
+
+    store.local_routes
+        .iter()
+        .find(|route| route.server_url == normalized && route_is_durable_contact_route(route, contact_id))
+        .map(|route| route.id.clone())
+}
+
 fn ensure_route_for_contact(store: &mut MessagingStore, contact_id: &str, server_url: &str) -> Result<LocalRoute, String> {
+    Ok(ensure_route_for_contact_detailed(store, contact_id, server_url)?.route)
+}
+
+fn ensure_route_for_contact_detailed(store: &mut MessagingStore, contact_id: &str, server_url: &str) -> Result<EnsureRouteOutcome, String> {
     cleanup_expired_routes(store);
     let normalized = normalize_server_url(Some(server_url.to_string()));
-    if let Some(existing_route_id) = store.contacts.iter().find(|c| c.id == contact_id).and_then(|c| c.local_route_id.clone()) {
-        if let Some(route) = store.local_routes.iter_mut().find(|r| r.id == existing_route_id) {
-            if route.server_url == normalized && route.active {
-                route.expires_at_ms = None;
-                ensure_route_cert_key(route)?;
-                return Ok(route.clone());
+    if let Some(contact_pos) = store.contacts.iter().position(|c| c.id == contact_id) {
+        if let Some(existing_route_id) = store.contacts[contact_pos].local_route_id.clone() {
+            if let Some(route_pos) = store.local_routes.iter().position(|r| r.id == existing_route_id) {
+                let route_matches = {
+                    let route = &store.local_routes[route_pos];
+                    route.server_url == normalized && route.active
+                };
+
+                if route_matches && route_is_durable_contact_route(&store.local_routes[route_pos], contact_id) {
+                    let route = &mut store.local_routes[route_pos];
+                    route.expires_at_ms = None;
+                    ensure_route_cert_key(route)?;
+                    return Ok(EnsureRouteOutcome { route: route.clone(), created_private_route: false });
+                }
+
+                let should_keep_as_invite_fallback = {
+                    let route = &store.local_routes[route_pos];
+                    route_matches
+                        && (route.scope == "pending_invite"
+                            || route_is_retiring_invite_for_contact(route, contact_id)
+                            || route.replacement_route_id.as_deref() == Some(route.id.as_str()))
+                };
+
+                if should_keep_as_invite_fallback {
+                    if let Some(durable_route_id) = durable_contact_route_id(store, contact_id, &normalized) {
+                        let durable_route_pos = store.local_routes
+                            .iter()
+                            .position(|route| route.id == durable_route_id)
+                            .ok_or_else(|| "durable contact route disappeared during route repair".to_string())?;
+                        let durable_route = {
+                            let route = &mut store.local_routes[durable_route_pos];
+                            ensure_route_cert_key(route)?;
+                            route.clone()
+                        };
+                        {
+                            let route = &mut store.local_routes[route_pos];
+                            route.scope = format!("retiring_invite:{contact_id}");
+                            route.replacement_route_id = Some(durable_route.id.clone());
+                            route.expires_at_ms = None;
+                            ensure_route_cert_key(route)?;
+                        }
+                        let contact = &mut store.contacts[contact_pos];
+                        contact.local_route_id = Some(durable_route.id.clone());
+                        return Ok(EnsureRouteOutcome { route: durable_route, created_private_route: true });
+                    }
+
+                    let fresh_route = new_local_route(normalized.clone(), contact_route_scope(contact_id), None)?;
+                    let fresh_route_id = fresh_route.id.clone();
+                    {
+                        let route = &mut store.local_routes[route_pos];
+                        route.scope = format!("retiring_invite:{contact_id}");
+                        route.replacement_route_id = Some(fresh_route_id.clone());
+                        route.expires_at_ms = None;
+                        ensure_route_cert_key(route)?;
+                    }
+                    store.local_routes.push(fresh_route.clone());
+                    let contact = &mut store.contacts[contact_pos];
+                    contact.local_route_id = Some(fresh_route_id);
+                    contact.acked_local_sender_mailbox_id = None;
+                    return Ok(EnsureRouteOutcome { route: fresh_route, created_private_route: true });
+                }
             }
         }
     }
-    rotate_local_route_for_contact(store, contact_id, &normalized)
+    let route = rotate_local_route_for_contact(store, contact_id, &normalized)?;
+    Ok(EnsureRouteOutcome { route, created_private_route: true })
 }
 
 fn rotate_local_route_for_contact(store: &mut MessagingStore, contact_id: &str, server_url: &str) -> Result<LocalRoute, String> {
@@ -909,6 +1010,7 @@ fn rotate_local_route_for_contact(store: &mut MessagingStore, contact_id: &str, 
     store.local_routes.push(route.clone());
     if let Some(contact) = store.contacts.iter_mut().find(|c| c.id == contact_id) {
         contact.local_route_id = Some(route_id);
+        contact.acked_local_sender_mailbox_id = None;
     }
     Ok(route)
 }
@@ -937,7 +1039,11 @@ fn sender_route_for_contact(store: &MessagingStore, contact_id: &str, fallback: 
     // undecryptable by the peer under route-scoped sessions.
     if has_reusable_prekey {
         if let Some(route_id) = contact.and_then(|c| c.local_route_id.clone()) {
-            if let Some(route) = store.local_routes.iter().find(|r| r.active && r.id == route_id && r.server_url == fallback.server_url) {
+            if let Some(route) = store.local_routes.iter().find(|r| {
+                r.id == route_id
+                    && r.server_url == fallback.server_url
+                    && route_is_durable_contact_route(r, contact_id)
+            }) {
                 return route.clone();
             }
         }
@@ -959,12 +1065,69 @@ fn sender_route_for_contact(store: &MessagingStore, contact_id: &str, fallback: 
 
     contact
         .and_then(|c| c.local_route_id.clone())
-        .and_then(|route_id| store.local_routes.iter().find(|r| r.active && r.id == route_id && r.server_url == fallback.server_url).cloned())
+        .and_then(|route_id| store.local_routes.iter().find(|r| {
+            r.id == route_id
+                && r.server_url == fallback.server_url
+                && route_is_durable_contact_route(r, contact_id)
+        }).cloned())
         .unwrap_or_else(|| fallback.clone())
 }
 
 fn route_is_retiring_invite(route: &LocalRoute) -> bool {
     route.scope.starts_with("retiring_invite:")
+}
+
+fn promote_local_route_after_incoming(
+    store: &mut MessagingStore,
+    local_route_id: &str,
+    contact_id: &str,
+    pending_invite_reusable: bool,
+) -> Result<(Option<LocalRoute>, bool), String> {
+    let Some(idx) = store.local_routes.iter().position(|r| r.id == local_route_id) else {
+        return Ok((None, false));
+    };
+
+    if store.local_routes[idx].scope == "pending_invite" {
+        let server_url = store.local_routes[idx].server_url.clone();
+        let durable_route_id = durable_contact_route_id(store, contact_id, &server_url);
+
+        let (route_for_peer, fresh_route_to_connect) = match durable_route_id {
+            Some(route_id) => {
+                if let Some(contact) = store.contacts.iter_mut().find(|c| c.id == contact_id) {
+                    contact.local_route_id = Some(route_id.clone());
+                }
+                (route_id, None)
+            }
+            None => {
+                let fresh_route = new_local_route(server_url, contact_route_scope(contact_id), None)?;
+                let fresh_route_id = fresh_route.id.clone();
+                if let Some(contact) = store.contacts.iter_mut().find(|c| c.id == contact_id) {
+                    contact.local_route_id = Some(fresh_route_id.clone());
+                    contact.acked_local_sender_mailbox_id = None;
+                }
+                store.local_routes.push(fresh_route.clone());
+                (fresh_route_id, Some(fresh_route))
+            }
+        };
+
+        if !pending_invite_reusable {
+            let route = &mut store.local_routes[idx];
+            route.scope = format!("retiring_invite:{contact_id}");
+            route.replacement_route_id = Some(route_for_peer);
+            route.expires_at_ms = None;
+        }
+
+        return Ok((fresh_route_to_connect, true));
+    }
+
+    if !route_is_sender_hold(&store.local_routes[idx], contact_id)
+        && !route_is_retiring_invite(&store.local_routes[idx])
+    {
+        store.local_routes[idx].scope = contact_route_scope(contact_id);
+        store.local_routes[idx].expires_at_ms = None;
+    }
+
+    Ok((None, false))
 }
 
 fn pin_server_trust_root(store: &mut MessagingStore, server_id: &str, trust_root_b64: &str) -> Result<bool, String> {
@@ -1349,6 +1512,7 @@ fn contact_from_payload(payload: InvitePayload, local_identity_public: &[u8]) ->
         verified_at_ms: None,
         local_route_id: None,
         peer_sender_mailbox_id: None,
+        acked_local_sender_mailbox_id: None,
         created_at_ms: now_ms(),
         last_read_at: None,
     })
@@ -1613,6 +1777,13 @@ pub async fn snapshot(app: AppHandle, session: &AppSessionState) -> Result<Messa
     let (store_key, legacy_store_key) = store_keys(session).await?;
     let mut store = load_store_with_keys(&app, &store_key, &legacy_store_key)?;
     cleanup_expired_routes(&mut store);
+    // A previous process owned the websocket that could have acknowledged these.
+    // Mark them failed on startup instead of preserving a permanent "sending".
+    for msg in store.messages.iter_mut() {
+        if msg.mine && msg.status == "relay_pending" {
+            msg.status = "send_failed".to_string();
+        }
+    }
     let mut grouped: HashMap<String, Vec<StoredMessage>> = HashMap::new();
     for msg in store.messages.clone() { grouped.entry(msg.contact_id.clone()).or_default().push(msg); }
     for msgs in grouped.values_mut() { msgs.sort_by_key(|m| (m.timestamp, m.received_at_ms.unwrap_or(m.timestamp))); }
@@ -1624,7 +1795,7 @@ pub async fn snapshot(app: AppHandle, session: &AppSessionState) -> Result<Messa
 
 pub async fn connect_all(app: AppHandle, session: &AppSessionState, transport_state: &transport::TransportState, tor_client: Arc<Mutex<Option<arti_client::TorClient<tor_rtcompat::PreferredRuntime>>>>) -> Result<(), String> {
     let (store_key, legacy_store_key) = store_keys(session).await?;
-    let (routes, retire_routes) = {
+    let (routes, retire_routes, route_sync_contacts) = {
         let _store_guard = session.messaging_store_lock.lock().await;
         let mut store = load_store_with_keys(&app, &store_key, &legacy_store_key)?;
         cleanup_expired_routes(&mut store);
@@ -1632,8 +1803,12 @@ pub async fn connect_all(app: AppHandle, session: &AppSessionState, transport_st
         // Make sure every imported contact has a private return mailbox on that
         // contact's relay. This avoids one global mailbox linking all contacts.
         let contact_routes: Vec<(String, String)> = store.contacts.iter().map(|c| (c.id.clone(), c.server_url.clone())).collect();
+        let mut route_sync_contacts = Vec::new();
         for (contact_id, server_url) in contact_routes {
-            let _ = ensure_route_for_contact(&mut store, &contact_id, &server_url)?;
+            let outcome = ensure_route_for_contact_detailed(&mut store, &contact_id, &server_url)?;
+            if outcome.created_private_route {
+                route_sync_contacts.push(contact_id);
+            }
         }
 
         for route in &mut store.local_routes {
@@ -1642,25 +1817,33 @@ pub async fn connect_all(app: AppHandle, session: &AppSessionState, transport_st
         let routes: Vec<LocalRoute> = store.local_routes.iter().filter(|r| r.active).cloned().collect();
         let retire_routes = store.pending_relay_retires.clone();
         save_store_with_key(&app, &store, &store_key)?;
-        (routes, retire_routes)
+        (routes, retire_routes, route_sync_contacts)
     };
 
+    // Retire old mailboxes in the background so we don't block live connection
+    // establishment. Each retire_mailbox_once can take 30–150 s over Tor.
     if !retire_routes.is_empty() {
-        let mut still_pending = Vec::new();
-        for route in retire_routes {
-            let retired = transport::retire_mailbox_once(
-                tor_client.clone(),
-                route.server_url.clone(),
-                route.mailbox_id.clone(),
-                route.receive_auth_token.clone(),
-                route.delivery_token.clone(),
-            ).await.is_ok();
-            if !retired { still_pending.push(route); }
-        }
-        let _store_guard = session.messaging_store_lock.lock().await;
-        let mut store = load_store_with_keys(&app, &store_key, &legacy_store_key)?;
-        store.pending_relay_retires = still_pending;
-        save_store_with_key(&app, &store, &store_key)?;
+        let app_retire = app.clone();
+        let session_retire = session.clone();
+        let tor_retire = tor_client.clone();
+        tokio::spawn(async move {
+            let mut still_pending = Vec::new();
+            for route in retire_routes {
+                let retired = transport::retire_mailbox_once(
+                    tor_retire.clone(),
+                    route.server_url.clone(),
+                    route.mailbox_id.clone(),
+                    route.receive_auth_token.clone(),
+                    route.delivery_token.clone(),
+                ).await.is_ok();
+                if !retired { still_pending.push(route); }
+            }
+            let _store_guard = session_retire.messaging_store_lock.lock().await;
+            if let Ok(mut store) = load_store_with_keys(&app_retire, &store_key, &legacy_store_key) {
+                store.pending_relay_retires = still_pending;
+                let _ = save_store_with_key(&app_retire, &store, &store_key);
+            }
+        });
     }
 
     let mut tasks = Vec::new();
@@ -1689,6 +1872,25 @@ pub async fn connect_all(app: AppHandle, session: &AppSessionState, transport_st
     }
     for task in tasks {
         let _ = task.await;
+    }
+    for contact_id in route_sync_contacts {
+        let app_clone = app.clone();
+        let session_clone = session.clone();
+        let transport_state_clone = transport_state.clone();
+        let tor_client_clone = tor_client.clone();
+        tokio::task::spawn_blocking(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+                return;
+            };
+            let _ = rt.block_on(send_route_control(
+                app_clone,
+                &session_clone,
+                &transport_state_clone,
+                tor_client_clone,
+                contact_id,
+                "route_sync",
+            ));
+        });
     }
     Ok(())
 }
@@ -1764,7 +1966,7 @@ async fn send_signal_payload_internal(
 
     let message_id = Uuid::new_v4().to_string();
     let sent_at = now_ms();
-    let (_send_server_url, send_to, send_delivery_token, wire_json, mut maybe_msg) = {
+    let (send_server_url, send_to, send_delivery_token, wire_json, mut maybe_msg) = {
         let _store_guard = session.messaging_store_lock.lock().await;
         let mut store = load_store_with_keys(&app, &store_key, &legacy_store_key)?;
         cleanup_expired_routes(&mut store);
@@ -1820,13 +2022,12 @@ async fn send_signal_payload_internal(
         )
     };
 
-    // Push the envelope onto the existing connection's outbound channel. This
-    // is instant (just a channel push, no network wait). The WebSocket reader
-    // loop emits axeno-send-receipt / axeno-send-failed events when the relay
-    // responds, and the frontend updates the message status from those events.
-    let push_result = transport::send_envelope_nowait(
-        transport_state,
-        connection_id_for_cert.clone(),
+    // Use a short-lived send socket for chat payloads. After restart the
+    // long-lived receive route can be present before it is ready; queueing onto
+    // that route returns locally but may never produce a relay ack for the UI.
+    let send_result = transport::send_envelope_once(
+        tor_client.clone(),
+        send_server_url,
         send_to,
         send_delivery_token,
         ENVELOPE_TYPE_SEALED_SIGNAL.to_string(),
@@ -1834,9 +2035,32 @@ async fn send_signal_payload_internal(
         Some(message_id.clone()),
     ).await;
 
-    // If the channel push failed (connection down), mark as failed immediately.
-    if let Err(err_msg) = push_result {
-        if visible {
+    match send_result {
+        Ok(ack) => {
+            if visible {
+                let next_status = if ack.queued { "relay_queued" } else { "relay_received" }.to_string();
+                if let Some(ref mut msg) = maybe_msg {
+                    msg.status = next_status.clone();
+                }
+                let _store_guard = session.messaging_store_lock.lock().await;
+                if let Ok(mut store) = load_store_with_keys(&app, &store_key, &legacy_store_key) {
+                    if let Some(stored) = store.messages.iter_mut().find(|m| m.id == message_id && m.mine) {
+                        stored.status = next_status;
+                        if let Some(ref mut msg) = maybe_msg {
+                            *msg = stored.clone();
+                        }
+                        let _ = save_store_with_key(&app, &store, &store_key);
+                    }
+                }
+                let _ = app.emit("axeno-send-receipt", transport::SendReceipt {
+                    server_id: connection_id_for_cert.clone(),
+                    id: ack.id,
+                    queued: ack.queued,
+                    client_ref: Some(message_id.clone()),
+                });
+            }
+        }
+        Err(err_msg) => {
             if let Some(ref mut msg) = maybe_msg {
                 msg.status = "send_failed".to_string();
             }
@@ -1848,11 +2072,14 @@ async fn send_signal_payload_internal(
                 }
             }
             let _ = app.emit("axeno-send-failed", transport::SendFailure {
-                server_id: connection_id_for_cert,
-                client_ref: Some(message_id),
-                code: "CONNECTION_DOWN".to_string(),
-                message: err_msg,
+                server_id: connection_id_for_cert.clone(),
+                client_ref: Some(message_id.clone()),
+                code: "SEND_FAILED".to_string(),
+                message: err_msg.clone(),
             });
+            if !visible {
+                return Err(err_msg);
+            }
         }
     }
 
@@ -2022,7 +2249,18 @@ pub async fn handle_incoming_envelope(
     let mut token_allowlist_update_after_save: Option<(String, Vec<String>)> = None;
     let mut route_sync_contact_after_save: Option<String> = None;
     let mut route_sync_ack_contact_after_save: Option<String> = None;
+    // Set when we receive a text: send a delivery_ack back to the sender.
+    let mut send_delivery_ack_for_msg_id: Option<String> = None;
+    // Set when we receive a delivery_ack: upgrade the outgoing message status in the UI.
+    let mut delivery_ack_upgraded_msg_id: Option<String> = None;
     let acked_peer_delivery_token_epoch = decrypted.message.acked_peer_delivery_token_epoch;
+    if let Some(acked_sender_mailbox) = decrypted.message.acked_peer_sender_mailbox_id.clone() {
+        if store.local_routes.iter().any(|route| route.mailbox_id == acked_sender_mailbox) {
+            if let Some(contact) = store.contacts.iter_mut().find(|c| c.id == contact_id) {
+                contact.acked_local_sender_mailbox_id = Some(acked_sender_mailbox);
+            }
+        }
+    }
     let msg = if decrypted.message.kind == "text" {
         let msg = StoredMessage {
             id: decrypted.message.message_id.clone(),
@@ -2034,7 +2272,21 @@ pub async fn handle_incoming_envelope(
             status: "received".to_string(),
         };
         store.messages.push(msg.clone());
+        send_delivery_ack_for_msg_id = Some(decrypted.message.message_id.clone());
         Some(msg)
+    } else if decrypted.message.kind == "delivery_ack" {
+        // Body holds the original outgoing message ID. Upgrade it from
+        // relay_queued → relay_received to show the peer actually got it.
+        let acked_id = decrypted.message.body.trim().to_string();
+        if !acked_id.is_empty() {
+            if let Some(stored) = store.messages.iter_mut().find(|m| {
+                m.id == acked_id && m.mine && m.contact_id == contact_id && m.status == "relay_queued"
+            }) {
+                stored.status = "relay_received".to_string();
+                delivery_ack_upgraded_msg_id = Some(acked_id);
+            }
+        }
+        None
     } else {
         None
     };
@@ -2044,6 +2296,9 @@ pub async fn handle_incoming_envelope(
             .filter(|route| route_is_retiring_invite(route))
             .filter_map(|route| {
                 let replacement_id = route.replacement_route_id.clone()?;
+                if replacement_id == route.id {
+                    return None;
+                }
                 let replacement_mailbox_matches = store.local_routes.iter()
                     .find(|candidate| candidate.id == replacement_id)
                     .map(|candidate| candidate.mailbox_id == acked_sender_mailbox)
@@ -2094,39 +2349,17 @@ pub async fn handle_incoming_envelope(
     // If this was a one-off invite mailbox, do not let that public invite route
     // become the permanent route. Keep it only as a temporary fallback until
     // the peer acknowledges our fresh private route, then retire it.
-    if let Some(idx) = store.local_routes.iter().position(|r| r.id == local_route.id) {
-        if store.local_routes[idx].scope == "pending_invite" {
-            let contact_has_route = store.contacts.iter().find(|c| c.id == contact_id).and_then(|c| c.local_route_id.clone());
-            
-            if contact_has_route.is_none() {
-                let server_url = store.local_routes[idx].server_url.clone();
-                let fresh_route = new_local_route(server_url, format!("contact:{contact_id}"), None)?;
-                
-                if !pending_invite_reusable {
-                    store.local_routes[idx].scope = format!("retiring_invite:{contact_id}");
-                    store.local_routes[idx].replacement_route_id = Some(fresh_route.id.clone());
-                    store.local_routes[idx].expires_at_ms = None;
-                }
-                
-                if let Some(contact) = store.contacts.iter_mut().find(|c| c.id == contact_id) {
-                    contact.local_route_id = Some(fresh_route.id.clone());
-                }
-                route_to_connect_after_save = Some(fresh_route.clone());
-                route_sync_contact_after_save = Some(contact_id.clone());
-                store.local_routes.push(fresh_route);
-            } else {
-                if !pending_invite_reusable {
-                    store.local_routes[idx].scope = format!("retiring_invite:{contact_id}");
-                    store.local_routes[idx].replacement_route_id = contact_has_route;
-                    store.local_routes[idx].expires_at_ms = None;
-                } else {
-                    route_sync_contact_after_save = Some(contact_id.clone());
-                }
-            }
-        } else if !route_is_sender_hold(&store.local_routes[idx], &contact_id) && !route_is_retiring_invite(&store.local_routes[idx]) {
-            store.local_routes[idx].scope = format!("contact:{contact_id}");
-            store.local_routes[idx].expires_at_ms = None;
-        }
+    let (fresh_route_after_save, needs_route_sync) = promote_local_route_after_incoming(
+        &mut store,
+        &local_route.id,
+        &contact_id,
+        pending_invite_reusable,
+    )?;
+    if let Some(fresh_route) = fresh_route_after_save {
+        route_to_connect_after_save = Some(fresh_route);
+    }
+    if needs_route_sync {
+        route_sync_contact_after_save = Some(contact_id.clone());
     }
     if decrypted.message.kind == "route_sync" {
         route_sync_ack_contact_after_save = Some(contact_id.clone());
@@ -2155,14 +2388,37 @@ pub async fn handle_incoming_envelope(
     let _ = transport::ack_envelopes(transport_state, server_id.clone(), vec![envelope.id]).await;
     runtime.seen_envelopes.lock().await.insert(envelope_key.clone(), now_ms());
     runtime.failed_envelopes.lock().await.remove(&envelope_key);
+    // Capture before the if-let blocks below move these options.
+    let doing_route_sync = route_sync_contact_after_save.is_some();
     if let Some(contact_id) = route_sync_contact_after_save {
         let _ = send_route_control(app.clone(), session, transport_state, tor_client.clone(), contact_id, "route_sync").await;
     }
     if let Some(contact_id) = route_sync_ack_contact_after_save {
         let _ = send_route_control(app.clone(), session, transport_state, tor_client.clone(), contact_id, "route_sync_ack").await;
     }
+    // Tell the frontend to upgrade the outgoing message that just got acked by the peer.
+    if let Some(acked_id) = delivery_ack_upgraded_msg_id {
+        let _ = app.emit("axeno-send-receipt", transport::SendReceipt {
+            server_id: server_id.clone(),
+            id: Uuid::new_v4(),
+            queued: false,
+            client_ref: Some(acked_id),
+        });
+    }
     if let Some(msg) = msg {
-        let _ = app.emit("axeno-message", IncomingMessageEvent { contact_id, message: msg });
+        let _ = app.emit("axeno-message", IncomingMessageEvent { contact_id: contact_id.clone(), message: msg });
+    }
+    // Send a delivery_ack so the sender's relay_queued status upgrades to relay_received.
+    // Skip when route_sync is active: that path already sends a PreKey message to establish
+    // the session. A concurrent delivery_ack would create a second conflicting PreKey
+    // exchange and corrupt the Signal session for the new contact.
+    if let Some(original_msg_id) = send_delivery_ack_for_msg_id {
+        if !doing_route_sync {
+            let _ = send_signal_payload_internal(
+                app.clone(), session, transport_state, tor_client.clone(),
+                contact_id, "delivery_ack", original_msg_id, false, false,
+            ).await;
+        }
     }
     Ok(())
 }
@@ -2637,6 +2893,7 @@ mod signal_protocol_engine {
         protocol_store: &InMemSignalProtocolStore,
         axeno_store: &mut MessagingStore,
         contact: &StoredContact,
+        local_address_name: &str,
     ) -> Result<(), String> {
         let address = remote_address(contact)?;
         if let Some(record) = protocol_store.load_session(&address).await.map_err(|e| signal_err("could not load libsignal session", e))? {
@@ -2649,6 +2906,7 @@ mod signal_protocol_engine {
                 device_id: contact.device_id,
                 session_b64: STANDARD_NO_PAD.encode(raw),
                 remote_identity_b64: contact.identity_public_b64.clone(),
+                local_address_name: local_address_name.to_string(),
                 created_at_ms: created,
                 updated_at_ms: now,
             });
@@ -2681,14 +2939,25 @@ mod signal_protocol_engine {
         acked_peer_sender_mailbox_id: Option<String>,
     ) -> Result<EncryptedForRelay, String> {
         let local_kyber = ensure_local_kyber_prekey(me, material, axeno_store)?;
-        // A fresh route should start a clean PreKey session when we actually
-        // have the peer's reusable prekey bundle from a connection code. When
-        // the peer was learned only from an inbound PreKey message, we may know
-        // their identity and return route but not their signed/kyber prekeys. In
-        // that case, keep the existing Signal session instead of breaking route
-        // sync with a "no usable prekey bundle" failure.
-        if force_prekey && contact_has_reusable_prekey_material(contact) {
-            let session_key = format!("{}:{}", contact.recipient_id, contact.device_id);
+        // Do not send ordinary Whisper messages from a local sender route until
+        // the peer has acknowledged that exact mailbox inside an encrypted
+        // payload. If a route-sync/prekey message was lost before restart, a
+        // saved local session can exist even though the peer cannot decrypt
+        // normal messages from this route yet. Keep using PreKey messages until
+        // the acknowledgement arrives.
+        let session_key = format!("{}:{}", contact.recipient_id, contact.device_id);
+        let route_changed_since_session = axeno_store.signal_sessions
+            .get(&session_key)
+            .map(|session| session.local_address_name != local_route.mailbox_id)
+            .unwrap_or(false);
+        let route_acknowledged_by_peer = contact
+            .acked_local_sender_mailbox_id
+            .as_deref()
+            .map(|mailbox| mailbox == local_route.mailbox_id)
+            .unwrap_or(false);
+        if (force_prekey || route_changed_since_session || !route_acknowledged_by_peer)
+            && contact_has_reusable_prekey_material(contact)
+        {
             axeno_store.signal_sessions.remove(&session_key);
         }
         let mut protocol_store = protocol_store_for(me, material, axeno_store).await?;
@@ -2758,7 +3027,7 @@ mod signal_protocol_engine {
         )
             .await
             .map_err(|e| signal_err("Signal message encryption failed", e))?;
-        persist_session(&protocol_store, axeno_store, contact).await?;
+        persist_session(&protocol_store, axeno_store, contact, &local_route.mailbox_id).await?;
 
         let sender_cert_raw = decode_b64(&sender_certificate.certificate_b64, "sender certificate")?;
         let sender_cert = SenderCertificate::deserialize(&sender_cert_raw)
@@ -2849,8 +3118,13 @@ mod signal_protocol_engine {
                 safety_number: String::new(),
                 trust_state: "unverified".to_string(),
                 verified_at_ms: None,
-                local_route_id: Some(local_route.id.clone()),
+                local_route_id: if route_is_durable_contact_route(local_route, &cert_sender_uuid) {
+                    Some(local_route.id.clone())
+                } else {
+                    None
+                },
                 peer_sender_mailbox_id: Some(cert_sender_uuid.clone()),
+                acked_local_sender_mailbox_id: None,
                 created_at_ms: now_ms(),
                 last_read_at: None,
             }
@@ -3041,8 +3315,9 @@ mod signal_protocol_engine {
             if !contact.delivery_token.is_empty() { existing.delivery_token = contact.delivery_token.clone(); }
             existing.delivery_token_epoch = existing.delivery_token_epoch.max(contact.delivery_token_epoch);
             existing.peer_sender_mailbox_id = contact.peer_sender_mailbox_id.clone().or_else(|| existing.peer_sender_mailbox_id.clone());
+            existing.acked_local_sender_mailbox_id = contact.acked_local_sender_mailbox_id.clone().or_else(|| existing.acked_local_sender_mailbox_id.clone());
             if existing.safety_number.is_empty() { existing.safety_number = contact.safety_number.clone(); }
-            if !route_is_retiring_invite(local_route) && !route_is_sender_hold(local_route, &existing.id) {
+            if route_is_durable_contact_route(local_route, &existing.id) {
                 existing.local_route_id = Some(local_route.id.clone());
             }
             if contact.opk_id.is_none() {
@@ -3051,7 +3326,7 @@ mod signal_protocol_engine {
             }
             contact = existing.clone();
         } else {
-            if !route_is_retiring_invite(local_route) && !route_is_sender_hold(local_route, &contact.id) {
+            if route_is_durable_contact_route(local_route, &contact.id) {
                 contact.local_route_id = Some(local_route.id.clone());
             }
             axeno_store.contacts.push(contact.clone());
@@ -3060,8 +3335,103 @@ mod signal_protocol_engine {
         let mut session_contact = contact.clone();
         session_contact.recipient_id = cert_sender_uuid.clone();
         session_contact.device_id = cert_sender_device;
-        persist_session(&protocol_store, axeno_store, &session_contact).await?;
+        persist_session(&protocol_store, axeno_store, &session_contact, &local_route.mailbox_id).await?;
         Ok(DecryptedEnvelope { contact, message: decoded, consumed_opk_ids })
     }
 
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    fn test_contact(id: &str, server_url: &str, local_route_id: Option<String>) -> StoredContact {
+        StoredContact {
+            id: id.to_string(),
+            display_name: None,
+            recipient_id: format!("mbx_peer_{id}"),
+            server_url: normalize_server_url(Some(server_url.to_string())),
+            server_id: server_id_for_url(server_url),
+            identity_public_b64: "identity".to_string(),
+            registration_id: 1,
+            device_id: DEVICE_ID,
+            signed_prekey_id: 1,
+            signed_prekey_public_b64: "signed".to_string(),
+            signed_prekey_signature_b64: "sig".to_string(),
+            opk_id: None,
+            opk_public_b64: None,
+            kyber_prekey_id: Some(1),
+            kyber_prekey_public_b64: Some("kyber".to_string()),
+            kyber_prekey_signature_b64: Some("kyber_sig".to_string()),
+            delivery_token: "dt_peer".to_string(),
+            delivery_token_epoch: 1,
+            safety_number: String::new(),
+            trust_state: "unverified".to_string(),
+            verified_at_ms: None,
+            local_route_id,
+            peer_sender_mailbox_id: None,
+            acked_local_sender_mailbox_id: None,
+            created_at_ms: now_ms(),
+            last_read_at: None,
+        }
+    }
+
+    #[test]
+    fn pending_invite_promotion_never_uses_invite_as_its_own_replacement() {
+        let server_url = DEFAULT_DEV_SERVER.to_string();
+        let pending = new_local_route(server_url.clone(), "pending_invite".to_string(), None).unwrap();
+        let pending_id = pending.id.clone();
+        let contact_id = "contact_a";
+        let mut store = MessagingStore::default();
+        store.local_routes.push(pending);
+        store.contacts.push(test_contact(contact_id, &server_url, Some(pending_id.clone())));
+
+        let (fresh_route, needs_route_sync) = promote_local_route_after_incoming(
+            &mut store,
+            &pending_id,
+            contact_id,
+            false,
+        ).unwrap();
+
+        let fresh_route = fresh_route.expect("pending invite should be replaced by a private route");
+        assert!(needs_route_sync);
+        assert_ne!(fresh_route.id, pending_id);
+        assert_eq!(fresh_route.scope, contact_route_scope(contact_id));
+
+        let contact = store.contacts.iter().find(|c| c.id == contact_id).unwrap();
+        assert_eq!(contact.local_route_id.as_deref(), Some(fresh_route.id.as_str()));
+
+        let old_route = store.local_routes.iter().find(|r| r.id == pending_id).unwrap();
+        assert!(old_route.active);
+        assert_eq!(old_route.scope, format!("retiring_invite:{contact_id}"));
+        assert_eq!(old_route.replacement_route_id.as_deref(), Some(fresh_route.id.as_str()));
+        assert_ne!(old_route.replacement_route_id.as_deref(), Some(old_route.id.as_str()));
+    }
+
+    #[test]
+    fn ensure_route_repairs_self_replacing_retiring_invite() {
+        let server_url = DEFAULT_DEV_SERVER.to_string();
+        let mut retiring = new_local_route(server_url.clone(), "pending_invite".to_string(), None).unwrap();
+        let retiring_id = retiring.id.clone();
+        let contact_id = "contact_b";
+        retiring.scope = format!("retiring_invite:{contact_id}");
+        retiring.replacement_route_id = Some(retiring_id.clone());
+
+        let mut store = MessagingStore::default();
+        store.local_routes.push(retiring);
+        store.contacts.push(test_contact(contact_id, &server_url, Some(retiring_id.clone())));
+
+        let outcome = ensure_route_for_contact_detailed(&mut store, contact_id, &server_url).unwrap();
+
+        assert!(outcome.created_private_route);
+        assert_ne!(outcome.route.id, retiring_id);
+        assert_eq!(outcome.route.scope, contact_route_scope(contact_id));
+
+        let contact = store.contacts.iter().find(|c| c.id == contact_id).unwrap();
+        assert_eq!(contact.local_route_id.as_deref(), Some(outcome.route.id.as_str()));
+
+        let old_route = store.local_routes.iter().find(|r| r.id == retiring_id).unwrap();
+        assert!(old_route.active);
+        assert_eq!(old_route.replacement_route_id.as_deref(), Some(outcome.route.id.as_str()));
+    }
 }
