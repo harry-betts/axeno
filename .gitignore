@@ -10,6 +10,7 @@ axeno-client/src-tauri/target/
 # Relay runtime data and local onion-service keys
 axeno-server/onion_address.txt
 axeno-server/axeno-relay-data/
+axeno-server/torrc.example
 
 # OS
 .DS_Store
