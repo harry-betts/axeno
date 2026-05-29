@@ -39,7 +39,7 @@ require_cmd npm
 require_cmd python3
 require_cmd cargo
 
-log "Deleting local Axeno test app data in ~/.local/share"
+#log "Deleting local Axeno test app data in ~/.local/share"
 #rm -rf "$HOME/.local/share/$APP_ID_A" "$HOME/.local/share/$APP_ID_B"
 
 log "Syncing axeno-client -> axeno-client2 (preserving dependencies)"

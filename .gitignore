@@ -1,7 +1,7 @@
 node_modules/
 dist/
 axeno-client2/
-# Rust
+axeno-server/axeno-relay-data/
 target/
 
 # Tauri
