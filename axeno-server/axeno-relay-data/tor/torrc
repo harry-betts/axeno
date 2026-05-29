@@ -1,6 +1,0 @@
-DataDirectory axeno-relay-data/tor
-HiddenServiceDir axeno-relay-data/tor/hs
-HiddenServiceVersion 3
-HiddenServicePort 80 127.0.0.1:8787
-SocksPort 0
-Log notice stdout
